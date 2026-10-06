@@ -34,6 +34,7 @@ private:
     void drawWaveforms (juce::Graphics& g, juce::Rectangle<float> area);
 
     juce::Rectangle<float> getWaveArea() const;
+    juce::Rectangle<float> getDuckLane (juce::Rectangle<float> area) const;
     bool isKickMode() const;
     bool getShapeHandlePos (juce::Rectangle<float> area, float& hx, float& hy) const;
     void setParamsFromMouse (const juce::MouseEvent& e);
@@ -44,7 +45,7 @@ private:
     KickDuckAudioProcessor& proc;
     KickDuckLookAndFeel lnf;
 
-    static constexpr int numKnobs = 11;
+    static constexpr int numKnobs = 12;
     juce::OwnedArray<juce::Slider> sliders;
     juce::OwnedArray<juce::Label> labels;
     juce::OwnedArray<juce::AudioProcessorValueTreeState::SliderAttachment> attachments;
@@ -61,7 +62,6 @@ private:
 
     static constexpr int frameSize = KickDuckAudioProcessor::frameSize;
 
-    // локальная копия последнего опубликованного кадра
     float frameMain[frameSize] = {};
     float frameOut [frameSize] = {};
     float frameSc  [frameSize] = {};

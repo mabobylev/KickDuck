@@ -8,6 +8,7 @@ KickDuckAudioProcessor::KickDuckAudioProcessor()
         .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
       apvts (*this, nullptr, "PARAMS", createLayout())
 {
+    pIn    = apvts.getRawParameterValue ("input");
     pThr   = apvts.getRawParameterValue ("threshold");
     pRatio = apvts.getRawParameterValue ("ratio");
     pAtk   = apvts.getRawParameterValue ("attack");
@@ -35,6 +36,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickDuckAudioProcessor::crea
         l.add (std::make_unique<P> (juce::ParameterID { id, 1 }, name, r, def,
                                     juce::AudioParameterFloatAttributes().withLabel (suffix)));
     };
+
+    add ("input", "Input", -12.0f, 12.0f, 0.0f, 0.1f, "dB");
 
     // COMP-режим
     add ("threshold", "Threshold", -60.0f, 0.0f,  -24.0f, 0.1f,  "dB");
@@ -92,7 +95,6 @@ void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
         f.prepare (spec);
 }
 
-// завершает текущий кадр и публикует его редактору (вызывается из аудио-потока)
 void KickDuckAudioProcessor::publishFrame()
 {
     if (framePos <= 0)
@@ -104,7 +106,6 @@ void KickDuckAudioProcessor::publishFrame()
         framePublished.store (frameWrite, std::memory_order_release);
         frameVersion.fetch_add (1, std::memory_order_relaxed);
 
-        // ротация: write -> published, free -> write, published -> free
         const int prev = frameWrite;
         frameWrite = frameFree;
         frameFree  = prev;
@@ -157,6 +158,15 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const int numMain = getChannelCountOfBus (true, 0);
     const int numSc   = getChannelCountOfBus (true, 1);
     const int n = buffer.getNumSamples();
+
+    // входной уровень применяется до всей обработки (метры и триггеры это учитывают)
+    const float inGain = juce::Decibels::decibelsToGain (pIn->load());
+    for (int ch = 0; ch < mainBuf.getNumChannels(); ++ch)
+    {
+        auto* d = mainBuf.getWritePointer (ch);
+        for (int i = 0; i < n; ++i)
+            d[i] *= inGain;
+    }
 
     if (numSc > 0 && ! kickMode)
     {
@@ -218,7 +228,6 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             gr = juce::jmax (gr, -depth);
             grSmoothed += (gr - grSmoothed) * grCoef;
 
-            // старт дака: кривая ушла ниже -0.1 дБ — публикуем завершённый кадр
             if (prevGr > -0.1f && grSmoothed <= -0.1f)
                 publishFrame();
 
@@ -231,7 +240,7 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             if (usePpq)
                 beatPos = *posInfo->getPpqPosition() + (double) i * bpm / (60.0 * (double) sr);
             else
-                beatPos = 0.0;   // без транспорта кадры не генерируются
+                beatPos = 0.0;
 
             float tn = 0.0f;
             const double frac = beatPos - std::floor (beatPos);
@@ -241,7 +250,6 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const float target = -depth * std::pow (1.0f - tn, shape);
             grSmoothed += (target - grSmoothed) * kickCoef;
 
-            // старт дака на границе доли: шип на графике + публикация кадра
             const double bf = std::floor (beatPos);
             if (usePpq && bf != lastBeatFloor)
             {

@@ -87,10 +87,10 @@ KickDuckAudioProcessorEditor::KickDuckAudioProcessorEditor (KickDuckAudioProcess
     : AudioProcessorEditor (&p), proc (p)
 {
     static constexpr const char* ids[] =
-        { "threshold", "ratio", "attack", "release", "knee",
+        { "input", "threshold", "ratio", "attack", "release", "knee",
           "depth", "shape", "kicklen", "mix", "hpf", "output" };
     static constexpr const char* names[] =
-        { "Thr", "Ratio", "Atk", "Rel", "Knee",
+        { "In", "Thr", "Ratio", "Atk", "Rel", "Knee",
           "Depth", "Shape", "Len", "Mix", "HPF", "Out" };
 
     setLookAndFeel (&lnf);
@@ -172,9 +172,11 @@ void KickDuckAudioProcessorEditor::updateModeUI()
     const bool kick = isKickMode();
     dspModeButton.setButtonText (kick ? "KICK" : "COMP");
 
-    for (int i : { 0, 1, 2, 3, 4, 9 })
+    // COMP: In, Thr, Ratio, Atk, Rel, Knee, Depth, Mix, HPF, Out
+    for (int i : { 0, 1, 2, 3, 4, 5, 6, 9, 10, 11 })
         sliders[i]->setEnabled (! kick);
-    for (int i : { 6, 7 })
+    // KICK: In, Shape, Len, Depth, Mix, Out
+    for (int i : { 0, 6, 7, 8, 9, 11 })
         sliders[i]->setEnabled (kick);
 }
 
@@ -229,8 +231,16 @@ juce::Rectangle<float> KickDuckAudioProcessorEditor::getWaveArea() const
     mid.removeFromTop (28.0f);
     mid.removeFromBottom (118.0f);
     mid.removeFromLeft (56.0f);
-    mid.removeFromRight (112.0f);   // справа два индикатора: GR и OUT
+    mid.removeFromRight (112.0f);
     return mid.reduced (6.0f);
+}
+
+// верхняя дорожка графика — под кривую сжатия (42% высоты)
+juce::Rectangle<float> KickDuckAudioProcessorEditor::getDuckLane (juce::Rectangle<float> area) const
+{
+    auto lane = area;
+    lane.removeFromBottom (area.getHeight() * 0.55f);
+    return lane.reduced (2.0f);
 }
 
 bool KickDuckAudioProcessorEditor::getShapeHandlePos (juce::Rectangle<float> area,
@@ -239,6 +249,7 @@ bool KickDuckAudioProcessorEditor::getShapeHandlePos (juce::Rectangle<float> are
     if (! isKickMode() || frameLen <= 0)
         return false;
 
+    const auto duckLane = getDuckLane (area);
     const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
     const float shape   = proc.apvts.getRawParameterValue ("shape")->load();
     const float duckFrac = juce::jlimit (0.02f, 1.0f,
@@ -248,22 +259,24 @@ bool KickDuckAudioProcessorEditor::getShapeHandlePos (juce::Rectangle<float> are
 
     const float tn = 0.5f * duckFrac;
     const float duckDb = depthDb * std::pow (1.0f - tn, shape);
-    const float frac = juce::jlimit (0.0f, 1.0f, 1.0f - duckDb / 24.0f);
+    const float frac = juce::jlimit (0.0f, 1.0f, duckDb / 24.0f);
 
     hx = tx;
-    hy = area.getY() + (1.0f - 0.9f * frac) * area.getHeight();
+    hy = duckLane.getY() + frac * duckLane.getHeight();
     return true;
 }
 
 void KickDuckAudioProcessorEditor::setParamsFromMouse (const juce::MouseEvent& e)
 {
     const auto area = getWaveArea();
+    const auto duckLane = getDuckLane (area);
     const bool kick = isKickMode();
     const int len = juce::jmax (1, frameLen);
     const float srHz = juce::jmax (1.0f, proc.sampleRateAtomic.load());
 
+    // вертикаль в верхней дорожке — глубина дака (внизу дорожки максимум)
     const float fracY = juce::jlimit (0.0f, 1.0f,
-            (area.getBottom() - e.position.y) / (area.getHeight() * 0.9f));
+            (duckLane.getBottom() - e.position.y) / duckLane.getHeight());
     if (auto* dp = proc.apvts.getParameter ("depth"))
         dp->setValueNotifyingHost (dp->convertTo0to1 (fracY * 24.0f));
 
@@ -289,6 +302,7 @@ void KickDuckAudioProcessorEditor::setParamsFromMouse (const juce::MouseEvent& e
 void KickDuckAudioProcessorEditor::setShapeFromMouse (const juce::MouseEvent& e)
 {
     const auto area = getWaveArea();
+    const auto duckLane = getDuckLane (area);
 
     const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
     if (depthDb <= 0.01f || frameLen <= 0)
@@ -298,9 +312,9 @@ void KickDuckAudioProcessorEditor::setShapeFromMouse (const juce::MouseEvent& e)
             proc.duckLenSamples.load() / (float) frameLen);
     const float tn = 0.5f * duckFrac;
 
-    const float yFrac = juce::jlimit (0.0f, 1.0f,
-            (area.getBottom() - e.position.y) / (area.getHeight() * 0.9f));
-    const float duckDb = 24.0f * (1.0f - yFrac);
+    const float frac = juce::jlimit (0.0f, 1.0f,
+            (e.position.y - duckLane.getY()) / duckLane.getHeight());
+    const float duckDb = 24.0f * frac;
     const float r = juce::jlimit (0.02f, 1.0f, duckDb / depthDb);
 
     float s = std::log (r) / std::log (1.0f - tn);
@@ -395,14 +409,14 @@ void KickDuckAudioProcessorEditor::paint (juce::Graphics& g)
     g.setGradientFill (bg);
     g.fillAll();
 
+    // заголовок и подзаголовок по явным координатам — не перекрываются
     g.setColour (juce::Colour (0xffc8ccd4));
     g.setFont (juce::Font (juce::FontOptions (18.0f, juce::Font::bold)));
-    g.drawText ("KickDuck", getLocalBounds().removeFromTop (30).removeFromLeft (200),
-                juce::Justification::centred);
+    g.drawText ("KickDuck", 12, 4, 120, 24, juce::Justification::centredLeft);
+
     g.setFont (13.0f);
     g.setColour (juce::Colour (0xff6b7280));
-    g.drawText ("sidechain ducker", getLocalBounds().removeFromTop (30).removeFromLeft (340),
-                juce::Justification::centredLeft);
+    g.drawText ("sidechain ducker", 140, 8, 220, 18, juce::Justification::centredLeft);
 
     auto mid = getLocalBounds().reduced (10);
     mid.removeFromTop (28);
@@ -469,10 +483,9 @@ void KickDuckAudioProcessorEditor::drawGrMeter (juce::Graphics& g, juce::Rectang
     g.drawRoundedRectangle (area, 5.0f, 1.0f);
 
     auto barArea = area.reduced (7.0f);
-    barArea.removeFromTop (18.0f);    // под лейбл
-    barArea.removeFromBottom (22.0f); // под значение
+    barArea.removeFromTop (18.0f);
+    barArea.removeFromBottom (22.0f);
 
-    // шкала: 0 дБ сверху, -24 внизу (ниспадающий индикатор)
     g.setColour (juce::Colours::grey.withAlpha (0.5f));
     for (int t = 0; t <= 24; t += 6)
     {
@@ -491,7 +504,6 @@ void KickDuckAudioProcessorEditor::drawGrMeter (juce::Graphics& g, juce::Rectang
         g.fillRoundedRectangle (barArea.getX(), barArea.getY(),
                                 barArea.getWidth(), h, 2.0f);
 
-    // значение на тёмной плашке — не сливается с градиентом
     auto valueRect = area.removeFromBottom (20.0f).reduced (4.0f, 2.0f);
     g.setColour (juce::Colour (0xff14161a));
     g.fillRoundedRectangle (valueRect, 3.0f);
@@ -523,29 +535,38 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         return;
     }
 
+    // две дорожки: сверху — кривая сжатия, снизу — волны сигнала
+    const auto duckLane = getDuckLane (area);
+    auto waveLane = area;
+    waveLane.removeFromTop (area.getHeight() * 0.42f);
+    waveLane = waveLane.reduced (2.0f);
+
     const int len = frameLen;
-    const int numCols = (int) area.getWidth();
-    const float midY = area.getCentreY();
-    const float amp  = area.getHeight() * 0.48f;
+    const int numCols = (int) waveLane.getWidth();
+    const float midY = waveLane.getCentreY();
+    const float amp  = waveLane.getHeight() * 0.46f;
 
     const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
     const float shape   = proc.apvts.getRawParameterValue ("shape")->load();
     const float duckFrac = juce::jlimit (0.02f, 1.0f,
             proc.duckLenSamples.load() / (float) len);
 
-    // маппинг уровня сжатия: 24 дБ -> низ кадра, 0 дБ -> верхняя точка
+    // уровень сжатия в верхней дорожке: 0 дБ — верх, 24 дБ — низ дорожки
     auto yForDuck = [&] (float duckDb)
     {
-        const float frac = juce::jlimit (0.0f, 1.0f, 1.0f - duckDb / 24.0f);
-        return area.getY() + (1.0f - 0.9f * frac) * area.getHeight();
+        const float frac = juce::jlimit (0.0f, 1.0f, duckDb / 24.0f);
+        return duckLane.getY() + frac * duckLane.getHeight();
     };
 
-    g.setColour (juce::Colours::grey.withAlpha (0.3f));
-    g.drawHorizontalLine ((int) midY, area.getX(), area.getRight());
-
-    // волны на одной оси
+    // волны автомасштабируются по пику кадра — каждая занимает всю свою дорожку
     auto drawEnvelope = [&] (const float* data, juce::Colour colour)
     {
+        float peak = 1.0e-6f;
+        for (int k = 0; k < len; ++k)
+            peak = juce::jmax (peak, std::abs (data[k]));
+
+        const float scale = amp / peak;
+
         g.setColour (colour);
         for (int x = 0; x < numCols; ++x)
         {
@@ -555,25 +576,26 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
             float lo = 0.0f, hi = 0.0f;
             for (int k = k0; k < k1 && k < len; ++k)
             {
-                const float v = data[k];
+                const float v = data[k] * scale;
                 lo = juce::jmin (lo, v);
                 hi = juce::jmax (hi, v);
             }
-            const float px = area.getX() + (float) x;
-            const float yTop = midY - juce::jlimit (-1.0f, 1.0f, hi) * amp;
-            const float yBot = midY - juce::jlimit (-1.0f, 1.0f, lo) * amp;
+            const float px = waveLane.getX() + (float) x;
+            const float yTop = midY - juce::jlimit (-1.0f, 1.0f, hi);
+            const float yBot = midY - juce::jlimit (-1.0f, 1.0f, lo);
             g.drawLine (px, yTop, px, yBot);
         }
     };
 
+    g.setColour (juce::Colours::grey.withAlpha (0.3f));
+    g.drawHorizontalLine ((int) midY, waveLane.getX(), waveLane.getRight());
+
     drawEnvelope (showOutput ? frameOut : frameMain, juce::Colours::steelblue.withAlpha (0.9f));
     drawEnvelope (frameSc, juce::Colours::orange.withAlpha (0.8f));
 
-    // LFO-волна сжатия.
-    // KICK: идеальная кривая по Shape/Len/Depth (с ручкой формы).
-    // COMP: измеренная кривая из кадра — отражает реальное сжатие от баса.
+    // кривая сжатия — отдельная верхняя дорожка.
+    // KICK: идеальная кривая по Shape/Len/Depth, COMP: измеренная из кадра.
     const float endX = area.getX() + duckFrac * area.getWidth();
-    // полка и спад занимают минимум 8% ширины, поэтому нарастание не правее 92%
     const float riseEndX = juce::jmin (endX, area.getX() + 0.92f * area.getWidth());
     const float plateauX = juce::jmax (riseEndX + 4.0f,
                                        area.getRight() - 0.05f * area.getWidth());
@@ -608,7 +630,6 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     }
     else
     {
-        // измеренная кривая сжатия: минимум GR по каждому столбцу
         bool started = false;
         for (int x = 0; x < numCols; ++x)
         {
@@ -619,7 +640,7 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
             for (int k = k0; k < k1 && k < len; ++k)
                 worst = juce::jmin (worst, frameGr[k]);
 
-            const float px = area.getX() + (float) x;
+            const float px = waveLane.getX() + (float) x;
             const float py = yForDuck (-worst);
             if (! started) { lfo.startNewSubPath (px, py); started = true; }
             else            lfo.lineTo (px, py);
@@ -629,12 +650,12 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         g.strokePath (lfo, juce::PathStrokeType (2.0f));
     }
 
-    // подписи: Duck слева сверху, Len/Rel справа СНИЗУ (не конфликтует с легендой)
+    // подписи
     g.setFont (11.0f);
 
     g.setColour (juce::Colours::cyan);
     g.drawText (juce::String ("Duck -") + juce::String (depthDb, 1) + " dB",
-                (int) area.getX() + 6, (int) area.getY() + 2, 110, 14,
+                (int) area.getX() + 6, (int) duckLane.getBottom() - 16, 110, 14,
                 juce::Justification::centredLeft);
 
     g.setColour (juce::Colours::white.withAlpha (0.8f));
@@ -644,14 +665,14 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         const float lenSec = (float) len / proc.sampleRateAtomic.load();
         const float beats = juce::jlimit (0.03125f, 8.0f, duckFrac * lenSec * bpm / 60.0f);
         g.drawText ("Len " + noteName (beats),
-                    (int) area.getRight() - 110, (int) area.getBottom() - 18, 104, 14,
+                    (int) area.getRight() - 110, (int) waveLane.getBottom() - 16, 104, 14,
                     juce::Justification::centredRight);
     }
     else
     {
         const float relMs = proc.apvts.getRawParameterValue ("release")->load();
         g.drawText ("Rel " + juce::String (relMs, 0) + " ms",
-                    (int) area.getRight() - 110, (int) area.getBottom() - 18, 104, 14,
+                    (int) area.getRight() - 110, (int) waveLane.getBottom() - 16, 104, 14,
                     juce::Justification::centredRight);
     }
 
@@ -687,3 +708,4 @@ void KickDuckAudioProcessorEditor::resized()
         labels[i]->setBounds (cell);
     }
 }
+
