@@ -12,7 +12,7 @@ public:
     // компактные шрифты для переключателей и их списков
     juce::Font getComboBoxFont (juce::ComboBox&) override
     { return juce::Font (juce::FontOptions (11.0f)); }
-    juce::Font getMenuFont() override
+    juce::Font getPopupMenuFont() override
     { return juce::Font (juce::FontOptions (11.0f)); }
     int getPopupMenuBorderSize() override { return 4; }
 };
