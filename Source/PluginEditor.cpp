@@ -648,3 +648,4 @@ void KickDuckAudioProcessorEditor::resized()
     }
 }
 
+

@@ -29,6 +29,8 @@ private:
     void timerCallback() override;
     void drawMeter (juce::Graphics& g, juce::Rectangle<float> area,
                     float db, const juce::String& label);
+    void drawGrMeter (juce::Graphics& g, juce::Rectangle<float> area,
+                      float db, const juce::String& label);
     void drawWaveforms (juce::Graphics& g, juce::Rectangle<float> area);
 
     juce::Rectangle<float> getWaveArea() const;
@@ -67,7 +69,7 @@ private:
     int   frameLen = 0;
     int   lastFrameVersion = -1;
 
-    float inDb = -100.0f, outDb = -100.0f;
+    float inDb = -100.0f, outDb = -100.0f, grDb = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KickDuckAudioProcessorEditor)
 };

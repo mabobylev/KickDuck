@@ -37,6 +37,7 @@ public:
     std::atomic<float> inLevel { 1.0e-5f };
     std::atomic<float> outLevel { 1.0e-5f };
     std::atomic<float> scLevel  { 1.0e-5f };
+    std::atomic<float> grLevel  { 0.0f };      // текущее сжатие, дБ (0..24)
 
     std::atomic<float> duckLenSamples  { 0.0f };
     std::atomic<float> bpmAtomic       { 120.0f };

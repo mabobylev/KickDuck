@@ -85,6 +85,7 @@ void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     sampleRateAtomic.store ((float) sampleRate, std::memory_order_relaxed);
     framePublished.store (-1, std::memory_order_relaxed);
     frameVersion.store (0, std::memory_order_relaxed);
+    grLevel.store (0.0f, std::memory_order_relaxed);
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, 1 };
     for (auto& f : scHP)
@@ -102,9 +103,11 @@ void KickDuckAudioProcessor::publishFrame()
         frameLens[frameWrite] = framePos;
         framePublished.store (frameWrite, std::memory_order_release);
         frameVersion.fetch_add (1, std::memory_order_relaxed);
-        const int next = frameFree;
-        frameFree = frameWrite;
-        frameWrite = next;
+
+        // ротация: write -> published, free -> write, published -> free
+        const int prev = frameWrite;
+        frameWrite = frameFree;
+        frameFree  = prev;
         framePos = 0;
     }
 }
@@ -144,6 +147,8 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float lenSec = (float) (beatDur * (double) lenBeats);
 
     const float kickCoef = std::exp (-1.0f / (float) (sr * 0.0015));
+    const float kickDispCoef = std::exp (-1.0f / (float) (sr * 0.04));
+    float kickDisp = 0.0f;
 
     duckLenSamples.store (lenSec * (float) sr, std::memory_order_relaxed);
 
@@ -176,7 +181,7 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float relCoef = std::exp (-1.0f / (float) (sr * release * 0.001));
     const float grCoef  = std::exp (-1.0f / (float) (sr * 0.005));
 
-    float peakIn = 0.0f, peakOut = 0.0f, peakSc = 0.0f;
+    float peakIn = 0.0f, peakOut = 0.0f, peakSc = 0.0f, peakDuck = 0.0f;
     float scDisp = 0.0f;
     float prevGr = grSmoothed;
 
@@ -233,25 +238,26 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             if (lenSec > 0.0f)
                 tn = juce::jlimit (0.0f, 1.0f, (float) (frac * beatDur / (double) lenSec));
 
-            const float pulse = (frac * beatDur < 0.002) ? 1.0f : 0.0f;
-
             const float target = -depth * std::pow (1.0f - tn, shape);
             grSmoothed += (target - grSmoothed) * kickCoef;
 
-            // старт дака на границе доли: публикуем предыдущий кадр
+            // старт дака на границе доли: шип на графике + публикация кадра
             const double bf = std::floor (beatPos);
             if (usePpq && bf != lastBeatFloor)
             {
                 lastBeatFloor = bf;
+                kickDisp = 1.0f;
                 publishFrame();
             }
+            kickDisp *= kickDispCoef;
 
-            peakSc = juce::jmax (peakSc, pulse);
-            scDisp = pulse;
+            peakSc = juce::jmax (peakSc, kickDisp);
+            scDisp = kickDisp;
         }
 
         grSmoothed = juce::jlimit (-depth, 0.0f, grSmoothed);
         prevGr = grSmoothed;
+        peakDuck = juce::jmax (peakDuck, -grSmoothed);
 
         const float g   = juce::Decibels::decibelsToGain (grSmoothed + outGain);
         const float wet = g * mix + (1.0f - mix);
@@ -267,7 +273,6 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         for (int ch = 0; ch < numMain; ++ch)
             mainBuf.setSample (ch, i, mainBuf.getSample (ch, i) * wet);
 
-        // пишем сэмпл в текущий накапливаемый кадр
         if (framePos < frameSize)
         {
             frameMain[frameWrite][framePos] = pre;
@@ -287,6 +292,11 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     updateLevel (inLevel,  peakIn);
     updateLevel (outLevel, peakOut);
     updateLevel (scLevel,  peakSc);
+
+    const float grDecay = std::exp (-(float) n / (float) (sr * 0.3f));
+    grLevel.store (juce::jmax (peakDuck,
+                   grLevel.load (std::memory_order_relaxed) * grDecay),
+                   std::memory_order_relaxed);
 }
 
 void KickDuckAudioProcessor::getStateInformation (juce::MemoryBlock& dest)
