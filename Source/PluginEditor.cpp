@@ -578,10 +578,10 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     const float duckFrac = juce::jlimit (0.02f, 1.0f,
             proc.duckLenSamples.load() / (float) len);
 
-    // две панели: слева бас (58%), справа кик/сайдчейн (42%)
-    const float bassW = waveLane.getWidth() * 0.58f;
-    auto bassPanel = waveLane.withWidth (bassW).reduced (2.0f);
-    auto kickPanel = waveLane.withLeft (waveLane.getX() + bassW).reduced (2.0f);
+    // две панели: слева кик/сайдчейн (42%), справа бас (58%)
+    const float kickW = waveLane.getWidth() * 0.42f;
+    auto kickPanel = waveLane.withWidth (kickW).reduced (2.0f);
+    auto bassPanel = waveLane.withLeft (waveLane.getX() + kickW).reduced (2.0f);
 
     auto yForDuck = [&] (float duckDb)
     {
@@ -589,24 +589,42 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         return duckLane.getY() + frac * duckLane.getHeight();
     };
 
-    // симметричная огибающая участка [s0..s1) на панели:
-    // lo/hi берутся из реальных отсчётов (вверх и вниз от средней линии),
-    // нормировка — RMS участка с ограничением по пику
+    // сегмент кика: в COMP показываем окно сайдчейна (релиз), в KICK — весь кадр
+    int scSeg = len;
+    if (! kick)
+    {
+        const float relSamples = proc.apvts.getRawParameterValue ("release")->load()
+                                 * 0.001f * proc.sampleRateAtomic.load();
+        const float segFrac = juce::jlimit (0.05f, 1.0f, relSamples / (float) len);
+        scSeg = juce::jmax (1, (int) (segFrac * (float) len));
+    }
+
+    // ОБЩАЯ нормировка: совместная RMS кика и баса -> обе панели в реальной
+    // пропорции друг к другу. Пики, выходящие за панель, обрезаются краем.
+    double sumSqKick = 0.0, sumSqBass = 0.0;
+    float peakKick = 1.0e-6f, peakBass = 1.0e-6f;
+    for (int k = 0; k < scSeg; ++k)
+    {
+        sumSqKick += (double) frameSc[k] * frameSc[k];
+        peakKick = juce::jmax (peakKick, std::abs (frameSc[k]));
+    }
+    const float* bassData = showOutput ? frameOut : frameMain;
+    for (int k = 0; k < len; ++k)
+    {
+        sumSqBass += (double) bassData[k] * bassData[k];
+        peakBass = juce::jmax (peakBass, std::abs (bassData[k]));
+    }
+    const int jointN = scSeg + len;
+    const float jointRms = (float) std::sqrt ((sumSqKick + sumSqBass) / (double) jointN);
+    const float jointPeak = juce::jmax (peakKick, peakBass);
+    const float amp = juce::jmin (kickPanel.getHeight(), bassPanel.getHeight()) * 0.46f;
+    const float scale = amp / juce::jmax (2.5f * jointRms, 0.15f * jointPeak);
+
+    // симметричная огибающая участка [s0..s1) на панели с ЗАДАННЫМ масштабом
     auto drawEnvelope = [&] (juce::Rectangle<float> panel, const float* data,
                              int s0, int s1, juce::Colour colour)
     {
         const int seg = juce::jmax (1, s1 - s0);
-        double sumSq = 0.0;
-        float peak = 1.0e-6f;
-        for (int k = s0; k < s1; ++k)
-        {
-            sumSq += (double) data[k] * data[k];
-            peak = juce::jmax (peak, std::abs (data[k]));
-        }
-        const float rms = (float) std::sqrt (sumSq / (double) seg);
-        const float amp = panel.getHeight() * 0.46f;
-        const float scale = amp / juce::jmax (2.5f * rms, 0.15f * peak);
-
         const float midY = panel.getCentreY();
         const int cols = juce::jmax (1, (int) panel.getWidth());
 
@@ -631,11 +649,11 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
 
     // разделитель панелей и средние линии
     g.setColour (juce::Colours::grey.withAlpha (0.35f));
-    g.drawVerticalLine ((int) (waveLane.getX() + bassW), waveLane.getY(), waveLane.getBottom());
-    g.drawHorizontalLine ((int) bassPanel.getCentreY(), bassPanel.getX(), bassPanel.getRight());
+    g.drawVerticalLine ((int) (waveLane.getX() + kickW), waveLane.getY(), waveLane.getBottom());
     g.drawHorizontalLine ((int) kickPanel.getCentreY(), kickPanel.getX(), kickPanel.getRight());
+    g.drawHorizontalLine ((int) bassPanel.getCentreY(), bassPanel.getX(), bassPanel.getRight());
 
-    // заливка сжатой части баса: длина дака в долях кадра -> ширина полосы
+    // заливка сжатой части баса на правой панели: длина дака -> ширина полосы
     const float duckShadeW = duckFrac * bassPanel.getWidth();
     g.setColour (juce::Colours::cyan.withAlpha (0.07f));
     g.fillRect (bassPanel.getX(), bassPanel.getY(),
@@ -644,21 +662,11 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     g.drawVerticalLine ((int) (bassPanel.getX() + duckShadeW),
                         bassPanel.getY(), bassPanel.getBottom());
 
-    // бас — одна волна на всю левую панель
-    drawEnvelope (bassPanel, showOutput ? frameOut : frameMain, 0, len,
-                  juce::Colours::steelblue.withAlpha (0.9f));
-
-    // кик — правая панель: участок начала кадра (в COMP — окно сайдчейна)
-    int scSeg = len;
-    if (! kick)
-    {
-        const float relSamples = proc.apvts.getRawParameterValue ("release")->load()
-                                 * 0.001f * proc.sampleRateAtomic.load();
-        const float segFrac = juce::jlimit (0.05f, 1.0f, relSamples / (float) len);
-        scSeg = juce::jmax (1, (int) (segFrac * (float) len));
-    }
+    // кик слева, бас справа — общая шкала
     drawEnvelope (kickPanel, frameSc, 0, scSeg,
                   juce::Colours::orange.withAlpha (0.9f));
+    drawEnvelope (bassPanel, bassData, 0, len,
+                  juce::Colours::steelblue.withAlpha (0.9f));
 
     // кривая сжатия — верхняя дорожка.
     // KICK: идеальная кривая по Shape/Len/Depth, COMP: измеренная из кадра.
@@ -720,14 +728,14 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     // подписи панелей
     g.setFont (11.0f);
 
-    g.setColour (juce::Colours::steelblue.brighter (0.4f));
-    g.drawText (showOutput ? "BASS OUT" : "BASS",
-                (int) bassPanel.getX() + 4, (int) bassPanel.getY(), 90, 14,
-                juce::Justification::centredLeft);
-
     g.setColour (juce::Colours::orange.brighter (0.3f));
     g.drawText (kick ? "KICK" : "SC",
                 (int) kickPanel.getX() + 4, (int) kickPanel.getY(), 60, 14,
+                juce::Justification::centredLeft);
+
+    g.setColour (juce::Colours::steelblue.brighter (0.4f));
+    g.drawText (showOutput ? "BASS OUT" : "BASS",
+                (int) bassPanel.getX() + 4, (int) bassPanel.getY(), 90, 14,
                 juce::Justification::centredLeft);
 
     // служебные подписи
