@@ -45,10 +45,18 @@ private:
     KickDuckAudioProcessor& proc;
     KickDuckLookAndFeel lnf;
 
-    static constexpr int numKnobs = 12;
+    static constexpr int numKnobs = 10;
     juce::OwnedArray<juce::Slider> sliders;
     juce::OwnedArray<juce::Label> labels;
     juce::OwnedArray<juce::AudioProcessorValueTreeState::SliderAttachment> attachments;
+
+    // ступенчатые переключатели Ratio и Knee
+    juce::ComboBox ratioCombo;
+    juce::ComboBox kneeCombo;
+    juce::Label ratioLabel { {}, "Ratio" };
+    juce::Label kneeLabel  { {}, "Knee" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> ratioAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> kneeAttach;
 
     juce::ComboBox presetCombo;
     juce::TextButton dspModeButton { "COMP" };

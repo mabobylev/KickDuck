@@ -30,10 +30,10 @@ const PresetDef presets[] =
     { "Trance Gate",    { { "mode", 1.0f }, { "depth", 20.0f }, { "shape", 5.0f },
                           { "kicklen", 0.25f } } },
     { "Comp Glue",      { { "mode", 0.0f }, { "threshold", -30.0f }, { "ratio", 4.0f },
-                          { "attack", 10.0f }, { "release", 150.0f }, { "knee", 6.0f },
+                          { "attack", 10.0f }, { "release", 150.0f },
                           { "depth", 6.0f } } },
-    { "Bass Killer",    { { "mode", 0.0f }, { "threshold", -38.0f }, { "ratio", 12.0f },
-                          { "attack", 0.5f }, { "release", 90.0f }, { "knee", 2.0f },
+    { "Bass Killer",    { { "mode", 0.0f }, { "threshold", -38.0f }, { "ratio", 7.0f },
+                          { "attack", 0.5f }, { "release", 90.0f },
                           { "depth", 15.0f } } },
 };
 }
@@ -86,11 +86,12 @@ void KickDuckLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int
 KickDuckAudioProcessorEditor::KickDuckAudioProcessorEditor (KickDuckAudioProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
+    // слайдеры (10 шт). Ratio и Knee теперь переключатели
     static constexpr const char* ids[] =
-        { "input", "threshold", "ratio", "attack", "release", "knee",
+        { "input", "threshold", "attack", "release",
           "depth", "shape", "kicklen", "mix", "hpf", "output" };
     static constexpr const char* names[] =
-        { "In", "Thr", "Ratio", "Atk", "Rel", "Knee",
+        { "In", "Thr", "Atk", "Rel",
           "Depth", "Shape", "Len", "Mix", "HPF", "Out" };
 
     setLookAndFeel (&lnf);
@@ -114,6 +115,34 @@ KickDuckAudioProcessorEditor::KickDuckAudioProcessorEditor (KickDuckAudioProcess
 
         attachments.add (new juce::AudioProcessorValueTreeState::SliderAttachment (proc.apvts, ids[i], *s));
     }
+
+    // переключатель Ratio
+    addAndMakeVisible (ratioCombo);
+    ratioCombo.addItemList (proc.apvts.getParameter ("ratio")->getAllValueStrings(), 1);
+    ratioCombo.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff26292f));
+    ratioCombo.setColour (juce::ComboBox::textColourId, juce::Colour (0xffc8ccd4));
+    ratioCombo.setColour (juce::ComboBox::arrowColourId, juce::Colour (0xff4fc3f7));
+    addAndMakeVisible (ratioLabel);
+    ratioLabel.setText ("Ratio", juce::dontSendNotification);
+    ratioLabel.setJustificationType (juce::Justification::centred);
+    ratioLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+    ratioLabel.setColour (juce::Label::textColourId, juce::Colour (0xff8a909b));
+    ratioAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
+                      (proc.apvts, "ratio", ratioCombo);
+
+    // переключатель Knee
+    addAndMakeVisible (kneeCombo);
+    kneeCombo.addItemList (proc.apvts.getParameter ("knee")->getAllValueStrings(), 1);
+    kneeCombo.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff26292f));
+    kneeCombo.setColour (juce::ComboBox::textColourId, juce::Colour (0xffc8ccd4));
+    kneeCombo.setColour (juce::ComboBox::arrowColourId, juce::Colour (0xff4fc3f7));
+    addAndMakeVisible (kneeLabel);
+    kneeLabel.setText ("Knee", juce::dontSendNotification);
+    kneeLabel.setJustificationType (juce::Justification::centred);
+    kneeLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+    kneeLabel.setColour (juce::Label::textColourId, juce::Colour (0xff8a909b));
+    kneeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
+                     (proc.apvts, "knee", kneeCombo);
 
     addAndMakeVisible (presetCombo);
     presetCombo.setTextWhenNothingSelected ("Preset");
@@ -172,12 +201,26 @@ void KickDuckAudioProcessorEditor::updateModeUI()
     const bool kick = isKickMode();
     dspModeButton.setButtonText (kick ? "KICK" : "COMP");
 
-    // COMP: In, Thr, Ratio, Atk, Rel, Knee, Depth, Mix, HPF, Out
-    for (int i : { 0, 1, 2, 3, 4, 5, 6, 9, 10, 11 })
-        sliders[i]->setEnabled (! kick);
-    // KICK: In, Shape, Len, Depth, Mix, Out
-    for (int i : { 0, 6, 7, 8, 9, 11 })
-        sliders[i]->setEnabled (kick);
+    if (kick)
+    {
+        // активны: In, Depth, Shape, Len, Mix, Out
+        for (int i : { 0, 4, 5, 6, 7, 9 })
+            sliders[i]->setEnabled (true);
+        for (int i : { 1, 2, 3, 8 })
+            sliders[i]->setEnabled (false);
+        ratioCombo.setEnabled (false);
+        kneeCombo.setEnabled (false);
+    }
+    else
+    {
+        // активны: In, Thr, Atk, Rel, Depth, Mix, HPF, Out
+        for (int i : { 0, 1, 2, 3, 4, 7, 8, 9 })
+            sliders[i]->setEnabled (true);
+        for (int i : { 5, 6 })
+            sliders[i]->setEnabled (false);
+        ratioCombo.setEnabled (true);
+        kneeCombo.setEnabled (true);
+    }
 }
 
 void KickDuckAudioProcessorEditor::applyPreset (int index)
@@ -274,7 +317,6 @@ void KickDuckAudioProcessorEditor::setParamsFromMouse (const juce::MouseEvent& e
     const int len = juce::jmax (1, frameLen);
     const float srHz = juce::jmax (1.0f, proc.sampleRateAtomic.load());
 
-    // вертикаль в верхней дорожке — глубина дака (внизу дорожки максимум)
     const float fracY = juce::jlimit (0.0f, 1.0f,
             (duckLane.getBottom() - e.position.y) / duckLane.getHeight());
     if (auto* dp = proc.apvts.getParameter ("depth"))
@@ -409,7 +451,6 @@ void KickDuckAudioProcessorEditor::paint (juce::Graphics& g)
     g.setGradientFill (bg);
     g.fillAll();
 
-    // заголовок и подзаголовок по явным координатам — не перекрываются
     g.setColour (juce::Colour (0xffc8ccd4));
     g.setFont (juce::Font (juce::FontOptions (18.0f, juce::Font::bold)));
     g.drawText ("KickDuck", 12, 4, 120, 24, juce::Justification::centredLeft);
@@ -551,21 +592,26 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     const float duckFrac = juce::jlimit (0.02f, 1.0f,
             proc.duckLenSamples.load() / (float) len);
 
-    // уровень сжатия в верхней дорожке: 0 дБ — верх, 24 дБ — низ дорожки
     auto yForDuck = [&] (float duckDb)
     {
         const float frac = juce::jlimit (0.0f, 1.0f, duckDb / 24.0f);
         return duckLane.getY() + frac * duckLane.getHeight();
     };
 
-    // волны автомасштабируются по пику кадра — каждая занимает всю свою дорожку
+    // нормировка по среднеквадратичному уровню с ограничением по пику:
+    // одиночный транзиент больше не сплющивает всю волну в ниточку
     auto drawEnvelope = [&] (const float* data, juce::Colour colour)
     {
+        double sumSq = 0.0;
         float peak = 1.0e-6f;
         for (int k = 0; k < len; ++k)
-            peak = juce::jmax (peak, std::abs (data[k]));
-
-        const float scale = amp / peak;
+        {
+            const float v = data[k];
+            sumSq += (double) v * v;
+            peak = juce::jmax (peak, std::abs (v));
+        }
+        const float rms = (float) std::sqrt (sumSq / (double) juce::jmax (1, len));
+        const float scale = amp / juce::jmax (2.5f * rms, 0.15f * peak);
 
         g.setColour (colour);
         for (int x = 0; x < numCols; ++x)
@@ -698,14 +744,30 @@ void KickDuckAudioProcessorEditor::resized()
     dspModeButton.setBounds (w - 186, 4, 84, 24);
     displayButton.setBounds (w - 96, 4, 86, 24);
 
-    auto sliderArea = getLocalBounds().reduced (10).removeFromBottom (114);
-    const int cw = sliderArea.getWidth() / numKnobs;
+    auto ctrlArea = getLocalBounds().reduced (10).removeFromBottom (114);
+    const int cw = ctrlArea.getWidth() / 12;
 
-    for (int i = 0; i < numKnobs; ++i)
+    // ячейки: In Thr [Ratio] Atk Rel [Knee] Depth Shape Len Mix HPF Out
+    static constexpr int cellToSlider[] = { 0, 1, -1, 2, 3, -1, 4, 5, 6, 7, 8, 9 };
+
+    for (int i = 0; i < 12; ++i)
     {
-        auto cell = sliderArea.removeFromLeft (cw).reduced (4);
-        sliders[i]->setBounds (cell.removeFromTop (cell.getHeight() - 18));
-        labels[i]->setBounds (cell);
+        auto cell = ctrlArea.removeFromLeft (cw).reduced (4);
+
+        if (cellToSlider[i] < 0)
+        {
+            auto& combo = (i == 2) ? ratioCombo : kneeCombo;
+            auto& lbl   = (i == 2) ? ratioLabel : kneeLabel;
+            combo.setBounds (cell.removeFromTop (cell.getHeight() - 18));
+            lbl.setBounds (cell);
+        }
+        else
+        {
+            const int si = cellToSlider[i];
+            auto sc = cell.removeFromTop (cell.getHeight() - 18);
+            sliders[si]->setBounds (sc);
+            labels[si]->setBounds (cell);
+        }
     }
 }
 

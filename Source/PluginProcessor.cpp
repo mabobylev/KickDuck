@@ -41,10 +41,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickDuckAudioProcessor::crea
 
     // COMP-режим
     add ("threshold", "Threshold", -60.0f, 0.0f,  -24.0f, 0.1f,  "dB");
-    add ("ratio",     "Ratio",       1.0f, 20.0f,  6.0f,  0.1f,  ":1");
     add ("attack",    "Attack",      0.1f, 100.0f, 5.0f,  0.1f,  "ms",  10.0f);
     add ("release",   "Release",     5.0f, 1000.0f, 120.0f, 1.0f, "ms",  100.0f);
-    add ("knee",      "Knee",        0.0f, 24.0f,  6.0f,  0.1f,  "dB");
+
+    // Ratio: ступени 1 .. 20 и бесконечность
+    l.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "ratio", 1 }, "Ratio",
+        juce::StringArray { "1:1", "1.5:1", "2:1", "3:1", "4:1",
+                            "6:1", "8:1", "10:1", "20:1", "Inf:1" },
+        4));
+
+    // Knee: ступени 0..24 дБ
+    l.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "knee", 1 }, "Knee",
+        juce::StringArray { "0 dB", "6 dB", "12 dB", "18 dB", "24 dB" },
+        1));
 
     // общие
     add ("depth",  "Max duck",  0.0f, 24.0f,   9.0f, 0.1f, "dB");
@@ -117,11 +128,15 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 {
     juce::ScopedNoDenormals noDenormals;
 
+    static constexpr float ratioVals[] =
+        { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 10.0f, 20.0f, 1000.0f };
+    static constexpr float kneeVals[] = { 0.0f, 6.0f, 12.0f, 18.0f, 24.0f };
+
     const float thr     = pThr->load();
-    const float ratio   = pRatio->load();
+    const float ratio   = ratioVals[juce::jlimit (0, 9, (int) pRatio->load())];
+    const float knee    = kneeVals [juce::jlimit (0, 4, (int) pKnee->load())];
     const float attack  = pAtk->load();
     const float release = pRel->load();
-    const float knee    = pKnee->load();
     const float depth   = pDepth->load();
     const float mix     = pMix->load() * 0.01f;
     const float outGain = pOut->load();
@@ -159,7 +174,6 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const int numSc   = getChannelCountOfBus (true, 1);
     const int n = buffer.getNumSamples();
 
-    // входной уровень применяется до всей обработки (метры и триггеры это учитывают)
     const float inGain = juce::Decibels::decibelsToGain (pIn->load());
     for (int ch = 0; ch < mainBuf.getNumChannels(); ++ch)
     {
