@@ -32,18 +32,17 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    static constexpr int frameSize = 131072;   // кадр: до ~3 с при 44.1 кГц
+    static constexpr int frameSize = 131072;
 
     std::atomic<float> inLevel { 1.0e-5f };
     std::atomic<float> outLevel { 1.0e-5f };
     std::atomic<float> scLevel  { 1.0e-5f };
-    std::atomic<float> grLevel  { 0.0f };      // текущее сжатие, дБ (0..24)
+    std::atomic<float> grLevel  { 0.0f };
 
     std::atomic<float> duckLenSamples  { 0.0f };
     std::atomic<float> bpmAtomic       { 120.0f };
     std::atomic<float> sampleRateAtomic { 44100.0f };
 
-    // тройная буферизация кадров: аудио пишет в один, редактор читает опубликованный
     std::atomic<int> framePublished { -1 };
     std::atomic<int> frameVersion   { 0 };
     juce::SpinLock frameLock;
@@ -68,6 +67,7 @@ private:
     int frameFree  = 1;
     int framePos   = 0;
 
+    std::atomic<float>* pIn = nullptr;
     std::atomic<float>* pThr = nullptr;
     std::atomic<float>* pRatio = nullptr;
     std::atomic<float>* pAtk = nullptr;
@@ -85,4 +85,3 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KickDuckAudioProcessor)
 };
-
