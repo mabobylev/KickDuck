@@ -146,6 +146,8 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     juce::Optional<juce::AudioPlayHead::PositionInfo> posInfo;
     double bpm = 120.0;
     bool havePlay = false;
+    bool usePpq = false;
+    double ppqPos = 0.0;
 
     if (auto* ph = getPlayHead())
         if ((posInfo = ph->getPosition()).hasValue())
@@ -153,11 +155,15 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             if (auto bpmOpt = posInfo->getBpm())
                 bpm = *bpmOpt;
             havePlay = posInfo->getIsPlaying();
+            if (havePlay && posInfo->getPpqPosition().hasValue())
+            {
+                usePpq = true;
+                ppqPos = *posInfo->getPpqPosition();
+            }
         }
 
     bpmAtomic.store ((float) bpm, std::memory_order_relaxed);
 
-    const bool usePpq = havePlay && posInfo->getPpqPosition().hasValue();
     const double beatDur = 60.0 / bpm;
     const float lenBeats = pLen->load();
     const float lenSec = (float) (beatDur * (double) lenBeats);
@@ -205,9 +211,39 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float relCoef = std::exp (-1.0f / (float) (sr * release * 0.001));
     const float grCoef  = std::exp (-1.0f / (float) (sr * 0.005));
 
+    // Публикация кадра — на границе каждой доли, в обоих режимах.
+    // Без PPQ тикают свободные часы; без транспорта кадр заморожен.
+    bool newBeat = false;
+    if (havePlay)
+    {
+        const double blockBeatPos = usePpq ? ppqPos : freeBeatPos;
+        const double bf = std::floor (blockBeatPos);
+
+        if (bf != lastBeatFloor)
+        {
+            lastBeatFloor = bf;
+            newBeat = true;
+        }
+
+        if (! usePpq)
+            freeBeatPos += (double) n * bpm / (60.0 * (double) sr);
+
+        if (newBeat)
+        {
+            if (kickMode)
+                kickDisp = 1.0f;
+            publishFrame();
+        }
+    }
+    else
+    {
+        // транспорт стоит: кадр остаётся на экране, накопление сбрасываем
+        framePos = 0;
+        lastBeatFloor = -1.0;
+    }
+
     float peakIn = 0.0f, peakOut = 0.0f, peakSc = 0.0f, peakDuck = 0.0f;
     float scDisp = 0.0f;
-    float prevGr = grSmoothed;
 
     for (int i = 0; i < n; ++i)
     {
@@ -242,19 +278,14 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             gr = juce::jmax (gr, -depth);
             grSmoothed += (gr - grSmoothed) * grCoef;
 
-            if (prevGr > -0.1f && grSmoothed <= -0.1f)
-                publishFrame();
-
             peakSc = juce::jmax (peakSc, sc);
             scDisp = sc;
         }
         else
         {
-            double beatPos;
-            if (usePpq)
-                beatPos = *posInfo->getPpqPosition() + (double) i * bpm / (60.0 * (double) sr);
-            else
-                beatPos = 0.0;
+            const double beatPos = usePpq
+                ? ppqPos + (double) i * bpm / (60.0 * (double) sr)
+                : freeBeatPos;
 
             float tn = 0.0f;
             const double frac = beatPos - std::floor (beatPos);
@@ -264,21 +295,12 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const float target = -depth * std::pow (1.0f - tn, shape);
             grSmoothed += (target - grSmoothed) * kickCoef;
 
-            const double bf = std::floor (beatPos);
-            if (usePpq && bf != lastBeatFloor)
-            {
-                lastBeatFloor = bf;
-                kickDisp = 1.0f;
-                publishFrame();
-            }
             kickDisp *= kickDispCoef;
-
             peakSc = juce::jmax (peakSc, kickDisp);
             scDisp = kickDisp;
         }
 
         grSmoothed = juce::jlimit (-depth, 0.0f, grSmoothed);
-        prevGr = grSmoothed;
         peakDuck = juce::jmax (peakDuck, -grSmoothed);
 
         const float g   = juce::Decibels::decibelsToGain (grSmoothed + outGain);
@@ -295,7 +317,7 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         for (int ch = 0; ch < numMain; ++ch)
             mainBuf.setSample (ch, i, mainBuf.getSample (ch, i) * wet);
 
-        if (framePos < frameSize)
+        if (havePlay && framePos < frameSize)
         {
             frameMain[frameWrite][framePos] = pre;
             frameOut [frameWrite][framePos] = pre * wet;
