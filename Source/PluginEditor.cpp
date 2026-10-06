@@ -220,6 +220,7 @@ void KickDuckAudioProcessorEditor::timerCallback()
 
     inDb  = juce::Decibels::gainToDecibels (proc.inLevel.load(), -100.0f);
     outDb = juce::Decibels::gainToDecibels (proc.outLevel.load(), -100.0f);
+    grDb  = proc.grLevel.load (std::memory_order_relaxed);
     repaint();
 }
 
@@ -229,7 +230,7 @@ juce::Rectangle<float> KickDuckAudioProcessorEditor::getWaveArea() const
     mid.removeFromTop (28.0f);
     mid.removeFromBottom (118.0f);
     mid.removeFromLeft (56.0f);
-    mid.removeFromRight (56.0f);
+    mid.removeFromRight (112.0f);   // справа два индикатора: GR и OUT
     return mid.reduced (6.0f);
 }
 
@@ -239,19 +240,19 @@ bool KickDuckAudioProcessorEditor::getShapeHandlePos (juce::Rectangle<float> are
     if (! isKickMode() || frameLen <= 0)
         return false;
 
-    const float duckFrac = juce::jlimit (0.05f, 1.0f,
+    const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
+    const float shape   = proc.apvts.getRawParameterValue ("shape")->load();
+    const float duckFrac = juce::jlimit (0.02f, 1.0f,
             proc.duckLenSamples.load() / (float) frameLen);
     const float endX = area.getX() + duckFrac * area.getWidth();
     const float tx = area.getX() + 0.5f * (endX - area.getX());
 
-    const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
-    const float shape   = proc.apvts.getRawParameterValue ("shape")->load();
-    const float tn      = 0.5f * duckFrac;
-    const float grDb    = -depthDb * std::pow (1.0f - tn, shape);
-    const float yFrac   = juce::jlimit (0.0f, 1.0f, (-grDb) / 24.0f);
+    const float tn = 0.5f * duckFrac;
+    const float duckDb = depthDb * std::pow (1.0f - tn, shape);
+    const float frac = juce::jlimit (0.0f, 1.0f, 1.0f - duckDb / 24.0f);
 
     hx = tx;
-    hy = area.getBottom() - yFrac * area.getHeight() * 0.9f;
+    hy = area.getY() + (1.0f - 0.9f * frac) * area.getHeight();
     return true;
 }
 
@@ -296,14 +297,15 @@ void KickDuckAudioProcessorEditor::setShapeFromMouse (const juce::MouseEvent& e)
     if (depthDb <= 0.01f || frameLen <= 0)
         return;
 
-    const float duckFrac = juce::jlimit (0.05f, 1.0f,
+    const float duckFrac = juce::jlimit (0.02f, 1.0f,
             proc.duckLenSamples.load() / (float) frameLen);
     const float tn = 0.5f * duckFrac;
 
+    // вертикаль курсора -> уровень сжатия в этой точке (внизу — максимум)
     const float yFrac = juce::jlimit (0.0f, 1.0f,
             (area.getBottom() - e.position.y) / (area.getHeight() * 0.9f));
-    const float dbAtT = yFrac * 24.0f;
-    const float r = juce::jlimit (0.02f, 1.0f, dbAtT / depthDb);
+    const float duckDb = 24.0f * (1.0f - yFrac);
+    const float r = juce::jlimit (0.02f, 1.0f, duckDb / depthDb);
 
     float s = std::log (r) / std::log (1.0f - tn);
     s = juce::jlimit (0.5f, 8.0f, s);
@@ -411,7 +413,12 @@ void KickDuckAudioProcessorEditor::paint (juce::Graphics& g)
     mid.removeFromBottom (118);
 
     drawMeter (g, mid.removeFromLeft (56).toFloat(), inDb, "IN");
-    drawMeter (g, mid.removeFromRight (56).toFloat(), outDb, "OUT");
+
+    auto rightBlock = mid.removeFromRight (108);
+    auto grRect  = rightBlock.removeFromLeft (52).toFloat();
+    drawGrMeter (g, grRect, grDb, "GR");
+    drawMeter (g, rightBlock.toFloat(), outDb, "OUT");
+
     drawWaveforms (g, mid.toFloat().reduced (6.0f));
 }
 
@@ -453,6 +460,43 @@ void KickDuckAudioProcessorEditor::drawMeter (juce::Graphics& g, juce::Rectangle
     g.drawText (label, area.removeFromTop (18.0f), juce::Justification::centred);
 }
 
+void KickDuckAudioProcessorEditor::drawGrMeter (juce::Graphics& g, juce::Rectangle<float> area,
+                                                float db, const juce::String& label)
+{
+    constexpr float maxDuck = 24.0f;
+
+    g.setColour (juce::Colour (0xff1f2228));
+    g.fillRoundedRectangle (area, 5.0f);
+    g.setColour (juce::Colours::black.withAlpha (0.35f));
+    g.drawRoundedRectangle (area, 5.0f, 1.0f);
+
+    auto barArea = area.reduced (7.0f).removeFromBottom (area.getHeight() - 26.0f);
+
+    g.setColour (juce::Colours::grey.withAlpha (0.5f));
+    for (int t = 0; t <= 24; t += 6)
+    {
+        const float frac = (float) t / maxDuck;
+        const float y = barArea.getBottom() - barArea.getHeight() * frac;
+        g.drawLine (barArea.getX(), y, barArea.getX() + 4.0f, y);
+    }
+
+    const float norm = juce::jlimit (0.0f, 1.0f, db / maxDuck);
+    const float h = barArea.getHeight() * norm;
+
+    juce::ColourGradient grad (juce::Colours::yellow, barArea.getX(), barArea.getBottom(),
+                               juce::Colours::orangered, barArea.getX(), barArea.getY(), false);
+    g.setGradientFill (grad);
+    if (h > 0.0f)
+        g.fillRoundedRectangle (barArea.getX(), barArea.getBottom() - h,
+                                barArea.getWidth(), h, 2.0f);
+
+    g.setColour (juce::Colours::white);
+    g.setFont (13.0f);
+    const juce::String dbText = (db < 0.05f) ? "0.0" : "-" + juce::String (db, 1);
+    g.drawText (dbText + " dB", area.removeFromBottom (22.0f), juce::Justification::centred);
+    g.drawText (label, area.removeFromTop (18.0f), juce::Justification::centred);
+}
+
 void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Rectangle<float> area)
 {
     const bool kick = isKickMode();
@@ -462,7 +506,6 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     g.setColour (juce::Colours::black.withAlpha (0.35f));
     g.drawRoundedRectangle (area, 6.0f, 1.0f);
 
-    // кадра ещё нет — ждём первый удар
     if (frameLen <= 0)
     {
         g.setColour (juce::Colours::grey.withAlpha (0.4f));
@@ -476,17 +519,25 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     const int len = frameLen;
     const int numCols = (int) area.getWidth();
     const float midY = area.getCentreY();
-    const float amp  = area.getHeight() * 0.45f;
+    const float amp  = area.getHeight() * 0.48f;
 
-    // кадр начинается со старта дака и тянется до следующего — всегда на всю ширину
-    const float onsetX = area.getX();
-    const float duckFrac = juce::jlimit (0.0f, 1.0f,
+    const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
+    const float shape   = proc.apvts.getRawParameterValue ("shape")->load();
+    const float duckFrac = juce::jlimit (0.02f, 1.0f,
             proc.duckLenSamples.load() / (float) len);
-    const float endX = onsetX + duckFrac * area.getWidth();
+    const float endX = area.getX() + duckFrac * area.getWidth();
+
+    // маппинг уровня LFO: duckDb=24 -> низ кадра, duckDb=0 -> верхняя точка
+    auto yForDuck = [&] (float duckDb)
+    {
+        const float frac = juce::jlimit (0.0f, 1.0f, 1.0f - duckDb / 24.0f);
+        return area.getY() + (1.0f - 0.9f * frac) * area.getHeight();
+    };
 
     g.setColour (juce::Colours::grey.withAlpha (0.3f));
     g.drawHorizontalLine ((int) midY, area.getX(), area.getRight());
 
+    // волны на одной оси: бас/прокачанный сигнал и кик/сайдчейн
     auto drawEnvelope = [&] (const float* data, juce::Colour colour)
     {
         g.setColour (colour);
@@ -509,95 +560,63 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         }
     };
 
-    drawEnvelope (showOutput ? frameOut : frameMain, juce::Colours::steelblue.withAlpha (0.85f));
-    drawEnvelope (frameSc, juce::Colours::orange.withAlpha (0.75f));
+    drawEnvelope (showOutput ? frameOut : frameMain, juce::Colours::steelblue.withAlpha (0.9f));
+    drawEnvelope (frameSc, juce::Colours::orange.withAlpha (0.8f));
 
-    // измеренная кривая GR
-    juce::Path grPath;
-    bool started = false;
-    for (int x = 0; x < numCols; ++x)
+    // LFO-волна задаваемого уровня сжатия: старт в нижней точке (сильное сжатие),
+    // нарастание к верхней точке, полка и спад в конце кадра
+    float riseEndX = endX;
+    if (! kick)
     {
-        const int k0 = (int) ((juce::int64) x * len / numCols);
-        const int k1 = juce::jmax (k0 + 1,
-                (int) ((juce::int64) (x + 1) * len / numCols));
-        float worst = 0.0f;
-        for (int k = k0; k < k1 && k < len; ++k)
-            worst = juce::jmin (worst, frameGr[k]);
-
-        const float px = area.getX() + (float) x;
-        const float py = area.getBottom() - (juce::jlimit (0.0f, 24.0f, -worst) / 24.0f)
-                                           * area.getHeight() * 0.9f;
-        if (! started) { grPath.startNewSubPath (px, py); started = true; }
-        else            grPath.lineTo (px, py);
+        const float relSamples = proc.apvts.getRawParameterValue ("release")->load()
+                                 * 0.001f * proc.sampleRateAtomic.load();
+        const float relFrac = juce::jlimit (0.02f, 1.0f, relSamples / (float) len);
+        riseEndX = area.getX() + relFrac * area.getWidth();
     }
-    g.setColour (juce::Colours::limegreen.withAlpha (0.9f));
-    g.strokePath (grPath, juce::PathStrokeType (1.5f));
 
-    // идеальная кривая дакинга с ручкой формы
+    const float fallFrac = 0.06f;
+    const float plateauX = area.getRight() - fallFrac * area.getWidth();
+
+    juce::Path lfo;
+    lfo.startNewSubPath (area.getX(), yForDuck (depthDb));
+
+    for (float fx = area.getX() + 2.0f; fx < riseEndX; fx += 2.0f)
+    {
+        const float tn = juce::jlimit (0.0f, 1.0f,
+                (fx - area.getX()) / juce::jmax (1.0f, riseEndX - area.getX()));
+        const float duck = kick
+            ? depthDb * std::pow (1.0f - tn, shape)
+            : depthDb * std::exp (-3.0f * tn / juce::jmax (0.02f,
+                    (riseEndX - area.getX()) / area.getWidth()));
+        lfo.lineTo (fx, yForDuck (duck));
+    }
+    lfo.lineTo (riseEndX, yForDuck (0.0f));
+    lfo.lineTo (plateauX, yForDuck (0.0f));
+    lfo.lineTo (area.getRight(), yForDuck (depthDb));
+
+    g.setColour (juce::Colours::cyan.withAlpha (0.85f));
+    g.strokePath (lfo, juce::PathStrokeType (2.0f));
+
+    // ручка формы кривой — середина дака (только KICK)
     if (kick)
     {
-        const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
-        const float shape   = proc.apvts.getRawParameterValue ("shape")->load();
-
-        juce::Path curve;
-        curve.startNewSubPath (onsetX, area.getBottom());
-        for (float fx = onsetX; fx <= endX; fx += 1.5f)
-        {
-            const float tn = juce::jlimit (0.0f, 1.0f,
-                    (fx - onsetX) / juce::jmax (1.0f, endX - onsetX));
-            const float db = depthDb * std::pow (1.0f - tn, shape);
-            const float yFrac = juce::jlimit (0.0f, 1.0f, db / 24.0f);
-            curve.lineTo (fx, area.getBottom() - yFrac * area.getHeight() * 0.9f);
-        }
-        curve.lineTo (endX, area.getBottom());
-
-        g.setColour (juce::Colours::limegreen.withAlpha (0.5f));
-        g.strokePath (curve, juce::PathStrokeType (2.0f));
-
         float hx, hy;
         if (getShapeHandlePos (area, hx, hy))
         {
             const float r = overShapeHandle || draggingShape ? 6.5f : 4.5f;
-            g.setColour (draggingShape ? juce::Colours::white : juce::Colours::limegreen);
+            g.setColour (draggingShape ? juce::Colours::white : juce::Colours::cyan);
             g.fillEllipse (hx - r, hy - r, r * 2.0f, r * 2.0f);
             g.setColour (juce::Colours::black.withAlpha (0.4f));
             g.drawEllipse (hx - r, hy - r, r * 2.0f, r * 2.0f, 1.0f);
         }
     }
 
-    // направляющая глубины: горизонтальная пунктирная линия
-    const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
-    const float dy = area.getBottom() - (juce::jlimit (0.0f, 24.0f, -depthDb) / 24.0f)
-                                        * area.getHeight() * 0.9f;
-
-    g.setColour (juce::Colours::limegreen.withAlpha (0.45f));
-    for (float x = area.getX(); x < area.getRight() - 8.0f; x += 14.0f)
-        g.drawLine (x, dy, juce::jmin (x + 8.0f, area.getRight()), dy, 1.0f);
-
-    // вертикальная пунктирная линия: конец дака (KICK) или релиз (COMP)
-    const char* hId = kick ? "kicklen" : "release";
-    float hFrac = 0.5f;
-    if (kick)
-        hFrac = duckFrac;
-    else
-    {
-        const float relSamples = proc.apvts.getRawParameterValue ("release")->load()
-                                 * 0.001f * proc.sampleRateAtomic.load();
-        hFrac = juce::jlimit (0.0f, 1.0f, relSamples / (float) len);
-    }
-    const float hx = area.getX() + hFrac * area.getWidth();
-
-    g.setColour (juce::Colours::white.withAlpha (0.35f));
-    for (float yy = area.getY(); yy < area.getBottom() - 6.0f; yy += 10.0f)
-        g.drawLine (hx, yy, hx, juce::jmin (yy + 6.0f, area.getBottom()), 1.0f);
-
-    // подписи направляющих
+    // подписи
     g.setFont (11.0f);
-    const float labelX = juce::jmin (hx + 6.0f, area.getRight() - 84.0f);
-
-    g.setColour (juce::Colours::limegreen);
-    g.drawText (juce::String ("Depth ") + juce::String (-depthDb, 1) + " dB",
-                (int) area.getX() + 6, (int) dy - 16, 90, 14, juce::Justification::centredLeft);
+    g.setColour (juce::Colours::cyan);
+    g.drawText (juce::String ("Duck -") + juce::String (depthDb, 1) + " dB",
+                (int) area.getX() + 6, (int) area.getY() + 2, 110, 14,
+                juce::Justification::centredLeft);
 
     g.setColour (juce::Colours::white.withAlpha (0.7f));
     if (kick)
@@ -605,18 +624,20 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         const float bpm = juce::jmax (20.0f, proc.bpmAtomic.load());
         const float lenSec = (float) len / proc.sampleRateAtomic.load();
         const float beats = juce::jlimit (0.03125f, 8.0f, duckFrac * lenSec * bpm / 60.0f);
-        g.drawText ("Len " + noteName (beats), (int) labelX,
-                    (int) area.getBottom() - 16, 84, 14, juce::Justification::centredLeft);
+        g.drawText ("Len " + noteName (beats),
+                    (int) area.getRight() - 110, (int) area.getY() + 2, 104, 14,
+                    juce::Justification::centredRight);
     }
     else
     {
         const float relMs = proc.apvts.getRawParameterValue ("release")->load();
-        g.drawText ("Rel " + juce::String (relMs, 0) + " ms", (int) labelX,
-                    (int) area.getBottom() - 16, 84, 14, juce::Justification::centredLeft);
+        g.drawText ("Rel " + juce::String (relMs, 0) + " ms",
+                    (int) area.getRight() - 110, (int) area.getY() + 2, 104, 14,
+                    juce::Justification::centredRight);
     }
 
     // легенда
-    auto legend = area.removeFromTop (16.0f).removeFromRight (170.0f);
+    auto legend = area.removeFromTop (16.0f).removeFromRight (176.0f);
     auto dot = [&] (juce::Colour c, juce::String txt, float lx, float lw)
     {
         g.setColour (c);
@@ -627,7 +648,7 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     };
     dot (juce::Colours::steelblue, showOutput ? "Ducked" : "Bass", legend.getX(), 52.0f);
     dot (juce::Colours::orange,    "Kick", legend.getX() + 60.0f, 40.0f);
-    dot (juce::Colours::limegreen, "GR",   legend.getX() + 108.0f, 32.0f);
+    dot (juce::Colours::cyan,      "Duck", legend.getX() + 108.0f, 40.0f);
 }
 
 void KickDuckAudioProcessorEditor::resized()
@@ -647,5 +668,4 @@ void KickDuckAudioProcessorEditor::resized()
         labels[i]->setBounds (cell);
     }
 }
-
 
