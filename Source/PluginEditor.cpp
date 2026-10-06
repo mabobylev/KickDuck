@@ -86,7 +86,7 @@ void KickDuckLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int
 KickDuckAudioProcessorEditor::KickDuckAudioProcessorEditor (KickDuckAudioProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
-    // слайдеры (10 шт). Ratio и Knee теперь переключатели
+    // слайдеры (10 шт). Ratio и Knee теперь компактные переключатели
     static constexpr const char* ids[] =
         { "input", "threshold", "attack", "release",
           "depth", "shape", "kicklen", "mix", "hpf", "output" };
@@ -116,31 +116,25 @@ KickDuckAudioProcessorEditor::KickDuckAudioProcessorEditor (KickDuckAudioProcess
         attachments.add (new juce::AudioProcessorValueTreeState::SliderAttachment (proc.apvts, ids[i], *s));
     }
 
-    // переключатель Ratio
-    addAndMakeVisible (ratioCombo);
-    ratioCombo.addItemList (proc.apvts.getParameter ("ratio")->getAllValueStrings(), 1);
-    ratioCombo.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff26292f));
-    ratioCombo.setColour (juce::ComboBox::textColourId, juce::Colour (0xffc8ccd4));
-    ratioCombo.setColour (juce::ComboBox::arrowColourId, juce::Colour (0xff4fc3f7));
-    addAndMakeVisible (ratioLabel);
-    ratioLabel.setText ("Ratio", juce::dontSendNotification);
-    ratioLabel.setJustificationType (juce::Justification::centred);
-    ratioLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
-    ratioLabel.setColour (juce::Label::textColourId, juce::Colour (0xff8a909b));
+    auto setupCombo = [&] (juce::ComboBox& combo, juce::Label& label, const char* paramName)
+    {
+        addAndMakeVisible (combo);
+        combo.addItemList (proc.apvts.getParameter (paramName)->getAllValueStrings(), 1);
+        combo.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff26292f));
+        combo.setColour (juce::ComboBox::textColourId, juce::Colour (0xffc8ccd4));
+        combo.setColour (juce::ComboBox::arrowColourId, juce::Colour (0xff4fc3f7));
+
+        addAndMakeVisible (label);
+        label.setJustificationType (juce::Justification::centred);
+        label.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        label.setColour (juce::Label::textColourId, juce::Colour (0xff8a909b));
+    };
+
+    setupCombo (ratioCombo, ratioLabel, "ratio");
+    setupCombo (kneeCombo,  kneeLabel,  "knee");
+
     ratioAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
                       (proc.apvts, "ratio", ratioCombo);
-
-    // переключатель Knee
-    addAndMakeVisible (kneeCombo);
-    kneeCombo.addItemList (proc.apvts.getParameter ("knee")->getAllValueStrings(), 1);
-    kneeCombo.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff26292f));
-    kneeCombo.setColour (juce::ComboBox::textColourId, juce::Colour (0xffc8ccd4));
-    kneeCombo.setColour (juce::ComboBox::arrowColourId, juce::Colour (0xff4fc3f7));
-    addAndMakeVisible (kneeLabel);
-    kneeLabel.setText ("Knee", juce::dontSendNotification);
-    kneeLabel.setJustificationType (juce::Justification::centred);
-    kneeLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
-    kneeLabel.setColour (juce::Label::textColourId, juce::Colour (0xff8a909b));
     kneeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
                      (proc.apvts, "knee", kneeCombo);
 
@@ -598,17 +592,16 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         return duckLane.getY() + frac * duckLane.getHeight();
     };
 
-    // нормировка по среднеквадратичному уровню с ограничением по пику:
-    // одиночный транзиент больше не сплющивает всю волну в ниточку
+    // нормировка по RMS: тело волны всегда крупное, пики упираются в край дорожки.
+    // Зажим амплитуды — к ±amp (в пикселях), а не к ±1.
     auto drawEnvelope = [&] (const float* data, juce::Colour colour)
     {
         double sumSq = 0.0;
         float peak = 1.0e-6f;
         for (int k = 0; k < len; ++k)
         {
-            const float v = data[k];
-            sumSq += (double) v * v;
-            peak = juce::jmax (peak, std::abs (v));
+            sumSq += (double) data[k] * data[k];
+            peak = juce::jmax (peak, std::abs (data[k]));
         }
         const float rms = (float) std::sqrt (sumSq / (double) juce::jmax (1, len));
         const float scale = amp / juce::jmax (2.5f * rms, 0.15f * peak);
@@ -627,8 +620,8 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
                 hi = juce::jmax (hi, v);
             }
             const float px = waveLane.getX() + (float) x;
-            const float yTop = midY - juce::jlimit (-1.0f, 1.0f, hi);
-            const float yBot = midY - juce::jlimit (-1.0f, 1.0f, lo);
+            const float yTop = midY - juce::jlimit (-amp, amp, hi);
+            const float yBot = midY - juce::jlimit (-amp, amp, lo);
             g.drawLine (px, yTop, px, yBot);
         }
     };
@@ -744,26 +737,31 @@ void KickDuckAudioProcessorEditor::resized()
     dspModeButton.setBounds (w - 186, 4, 84, 24);
     displayButton.setBounds (w - 96, 4, 86, 24);
 
+    // 11 колонок: In Thr [Ratio+Knee] Atk Rel Depth Shape Len Mix HPF Out
+    static constexpr int colToSlider[] = { 0, 1, -1, 2, 3, 4, 5, 6, 7, 8, 9 };
+
     auto ctrlArea = getLocalBounds().reduced (10).removeFromBottom (114);
-    const int cw = ctrlArea.getWidth() / 12;
+    const int cw = ctrlArea.getWidth() / 11;
 
-    // ячейки: In Thr [Ratio] Atk Rel [Knee] Depth Shape Len Mix HPF Out
-    static constexpr int cellToSlider[] = { 0, 1, -1, 2, 3, -1, 4, 5, 6, 7, 8, 9 };
-
-    for (int i = 0; i < 12; ++i)
+    for (int col = 0; col < 11; ++col)
     {
         auto cell = ctrlArea.removeFromLeft (cw).reduced (4);
 
-        if (cellToSlider[i] < 0)
+        if (colToSlider[col] < 0)
         {
-            auto& combo = (i == 2) ? ratioCombo : kneeCombo;
-            auto& lbl   = (i == 2) ? ratioLabel : kneeLabel;
-            combo.setBounds (cell.removeFromTop (cell.getHeight() - 18));
-            lbl.setBounds (cell);
+            // обе колонки-переключателя в одной ячейке, друг над другом
+            auto top = cell.removeFromTop (cell.getHeight() / 2 - 2);
+            auto bot = cell;
+
+            ratioLabel.setBounds (top.removeFromTop (12));
+            ratioCombo.setBounds (top.removeFromTop (20));
+
+            kneeLabel.setBounds (bot.removeFromTop (12));
+            kneeCombo.setBounds (bot.removeFromTop (20));
         }
         else
         {
-            const int si = cellToSlider[i];
+            const int si = colToSlider[col];
             auto sc = cell.removeFromTop (cell.getHeight() - 18);
             sliders[si]->setBounds (sc);
             labels[si]->setBounds (cell);

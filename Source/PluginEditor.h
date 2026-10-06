@@ -8,6 +8,13 @@ class KickDuckLookAndFeel : public juce::LookAndFeel_V4
 public:
     void drawRotarySlider (juce::Graphics&, int, int, int, int, float,
                            float, float, juce::Slider&) override;
+
+    // компактные шрифты для переключателей и их списков
+    juce::Font getComboBoxFont (juce::ComboBox&) override
+    { return juce::Font (juce::FontOptions (11.0f)); }
+    juce::Font getMenuFont() override
+    { return juce::Font (juce::FontOptions (11.0f)); }
+    int getPopupMenuBorderSize() override { return 4; }
 };
 
 class KickDuckAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -50,7 +57,7 @@ private:
     juce::OwnedArray<juce::Label> labels;
     juce::OwnedArray<juce::AudioProcessorValueTreeState::SliderAttachment> attachments;
 
-    // ступенчатые переключатели Ratio и Knee
+    // ступенчатые переключатели Ratio и Knee — обе в одной колонке
     juce::ComboBox ratioCombo;
     juce::ComboBox kneeCombo;
     juce::Label ratioLabel { {}, "Ratio" };
