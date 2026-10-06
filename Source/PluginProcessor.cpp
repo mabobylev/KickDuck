@@ -44,14 +44,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickDuckAudioProcessor::crea
     add ("attack",    "Attack",      0.1f, 100.0f, 5.0f,  0.1f,  "ms",  10.0f);
     add ("release",   "Release",     5.0f, 1000.0f, 120.0f, 1.0f, "ms",  100.0f);
 
-    // Ratio: ступени 1 .. 20 и бесконечность
     l.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "ratio", 1 }, "Ratio",
         juce::StringArray { "1:1", "1.5:1", "2:1", "3:1", "4:1",
                             "6:1", "8:1", "10:1", "20:1", "Inf:1" },
         4));
 
-    // Knee: ступени 0..24 дБ
     l.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "knee", 1 }, "Knee",
         juce::StringArray { "0 dB", "6 dB", "12 dB", "18 dB", "24 dB" },
@@ -92,6 +90,7 @@ void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     lastHpf = -1.0f;
     freeBeatPos = 0.0;
     lastBeatFloor = -1.0;
+    kickPhase = 0.0;
     framePos = 0;
     frameWrite = 0;
     frameFree = 1;
@@ -211,8 +210,6 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float relCoef = std::exp (-1.0f / (float) (sr * release * 0.001));
     const float grCoef  = std::exp (-1.0f / (float) (sr * 0.005));
 
-    // Публикация кадра — на границе каждой доли, в обоих режимах.
-    // Без PPQ тикают свободные часы; без транспорта кадр заморожен.
     bool newBeat = false;
     if (havePlay)
     {
@@ -231,13 +228,15 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         if (newBeat)
         {
             if (kickMode)
+            {
                 kickDisp = 1.0f;
+                kickPhase = 0.0;
+            }
             publishFrame();
         }
     }
     else
     {
-        // транспорт стоит: кадр остаётся на экране, накопление сбрасываем
         framePos = 0;
         lastBeatFloor = -1.0;
     }
@@ -279,7 +278,7 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             grSmoothed += (gr - grSmoothed) * grCoef;
 
             peakSc = juce::jmax (peakSc, sc);
-            scDisp = sc;
+            scDisp = scBuf.getNumSamples() > 0 ? scBuf.getSample (0, i) : sc;
         }
         else
         {
@@ -295,9 +294,14 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const float target = -depth * std::pow (1.0f - tn, shape);
             grSmoothed += (target - grSmoothed) * kickCoef;
 
+            // биполярная синтетическая волна кика для дисплея: синус 60 Гц со спадом
             kickDisp *= kickDispCoef;
+            kickPhase += juce::MathConstants<double>::twoPi * 60.0 / sr;
+            if (kickPhase >= juce::MathConstants<double>::twoPi)
+                kickPhase -= juce::MathConstants<double>::twoPi;
+
+            scDisp = kickDisp * (float) std::sin (kickPhase);
             peakSc = juce::jmax (peakSc, kickDisp);
-            scDisp = kickDisp;
         }
 
         grSmoothed = juce::jlimit (-depth, 0.0f, grSmoothed);

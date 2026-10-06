@@ -196,7 +196,6 @@ void KickDuckAudioProcessorEditor::updateModeUI()
 
     if (kick)
     {
-        // активны: In, Depth, Shape, Len, Mix, Out
         for (int i : { 0, 4, 5, 6, 7, 9 })
             sliders[i]->setEnabled (true);
         for (int i : { 1, 2, 3, 8 })
@@ -206,7 +205,6 @@ void KickDuckAudioProcessorEditor::updateModeUI()
     }
     else
     {
-        // активны: In, Thr, Atk, Rel, Depth, Mix, HPF, Out
         for (int i : { 0, 1, 2, 3, 4, 7, 8, 9 })
             sliders[i]->setEnabled (true);
         for (int i : { 5, 6 })
@@ -574,26 +572,16 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
     waveLane = waveLane.reduced (2.0f);
 
     const int len = frameLen;
-    const float midY = waveLane.getCentreY();
-    const float amp  = waveLane.getHeight() * 0.46f;
 
     const float depthDb = proc.apvts.getRawParameterValue ("depth")->load();
     const float shape   = proc.apvts.getRawParameterValue ("shape")->load();
     const float duckFrac = juce::jlimit (0.02f, 1.0f,
             proc.duckLenSamples.load() / (float) len);
 
-    // левая зона кика: окно взаимодействия.
-    // KICK — длина дака; COMP — окно релиза (сжатие баса живёт там)
-    float zoneFrac = duckFrac;
-    if (! kick)
-    {
-        const float relSamples = proc.apvts.getRawParameterValue ("release")->load()
-                                 * 0.001f * proc.sampleRateAtomic.load();
-        zoneFrac = juce::jlimit (0.08f, 0.6f, relSamples / (float) len);
-    }
-
-    const int   zoneSamples = juce::jmax (1, (int) ((float) len * zoneFrac));
-    const float zoneX = waveLane.getX() + zoneFrac * waveLane.getWidth();
+    // две панели: слева бас (58%), справа кик/сайдчейн (42%)
+    const float bassW = waveLane.getWidth() * 0.58f;
+    auto bassPanel = waveLane.withWidth (bassW).reduced (2.0f);
+    auto kickPanel = waveLane.withLeft (waveLane.getX() + bassW).reduced (2.0f);
 
     auto yForDuck = [&] (float duckDb)
     {
@@ -601,10 +589,11 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         return duckLane.getY() + frac * duckLane.getHeight();
     };
 
-    // огибающая участка [s0..s1) растягивается по пикселям [x0..x1),
-    // нормировка — RMS по своему участку с ограничением по пику
-    auto drawEnvelope = [&] (const float* data, juce::Colour colour,
-                             float x0, float x1, int s0, int s1)
+    // симметричная огибающая участка [s0..s1) на панели:
+    // lo/hi берутся из реальных отсчётов (вверх и вниз от средней линии),
+    // нормировка — RMS участка с ограничением по пику
+    auto drawEnvelope = [&] (juce::Rectangle<float> panel, const float* data,
+                             int s0, int s1, juce::Colour colour)
     {
         const int seg = juce::jmax (1, s1 - s0);
         double sumSq = 0.0;
@@ -615,9 +604,12 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
             peak = juce::jmax (peak, std::abs (data[k]));
         }
         const float rms = (float) std::sqrt (sumSq / (double) seg);
+        const float amp = panel.getHeight() * 0.46f;
         const float scale = amp / juce::jmax (2.5f * rms, 0.15f * peak);
 
-        const int cols = juce::jmax (1, (int) (x1 - x0));
+        const float midY = panel.getCentreY();
+        const int cols = juce::jmax (1, (int) panel.getWidth());
+
         g.setColour (colour);
         for (int x = 0; x < cols; ++x)
         {
@@ -631,28 +623,42 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
                 lo = juce::jmin (lo, v);
                 hi = juce::jmax (hi, v);
             }
-            const float px = x0 + (float) x;
-            const float yTop = midY - juce::jlimit (-amp, amp, hi);
-            const float yBot = midY - juce::jlimit (-amp, amp, lo);
-            g.drawLine (px, yTop, px, yBot);
+            const float px = panel.getX() + (float) x;
+            g.drawLine (px, midY - juce::jlimit (-amp, amp, hi),
+                        px, midY - juce::jlimit (-amp, amp, lo));
         }
     };
 
-    g.setColour (juce::Colours::grey.withAlpha (0.3f));
-    g.drawHorizontalLine ((int) midY, waveLane.getX(), waveLane.getRight());
+    // разделитель панелей и средние линии
+    g.setColour (juce::Colours::grey.withAlpha (0.35f));
+    g.drawVerticalLine ((int) (waveLane.getX() + bassW), waveLane.getY(), waveLane.getBottom());
+    g.drawHorizontalLine ((int) bassPanel.getCentreY(), bassPanel.getX(), bassPanel.getRight());
+    g.drawHorizontalLine ((int) kickPanel.getCentreY(), kickPanel.getX(), kickPanel.getRight());
 
-    // бас — по всей ширине кадра
-    drawEnvelope (showOutput ? frameOut : frameMain,
-                  juce::Colours::steelblue.withAlpha (0.75f),
-                  waveLane.getX(), waveLane.getRight(), 0, len);
+    // заливка сжатой части баса: длина дака в долях кадра -> ширина полосы
+    const float duckShadeW = duckFrac * bassPanel.getWidth();
+    g.setColour (juce::Colours::cyan.withAlpha (0.07f));
+    g.fillRect (bassPanel.getX(), bassPanel.getY(),
+                duckShadeW, bassPanel.getHeight());
+    g.setColour (juce::Colours::cyan.withAlpha (0.25f));
+    g.drawVerticalLine ((int) (bassPanel.getX() + duckShadeW),
+                        bassPanel.getY(), bassPanel.getBottom());
 
-    // кик — левая зона, поверх баса: перекрытие видно прямо на графике
-    drawEnvelope (frameSc, juce::Colours::orange.withAlpha (0.95f),
-                  waveLane.getX(), zoneX, 0, zoneSamples);
+    // бас — одна волна на всю левую панель
+    drawEnvelope (bassPanel, showOutput ? frameOut : frameMain, 0, len,
+                  juce::Colours::steelblue.withAlpha (0.9f));
 
-    // граница зоны кика
-    g.setColour (juce::Colours::orange.withAlpha (0.3f));
-    g.drawVerticalLine ((int) zoneX, waveLane.getY(), waveLane.getBottom());
+    // кик — правая панель: участок начала кадра (в COMP — окно сайдчейна)
+    int scSeg = len;
+    if (! kick)
+    {
+        const float relSamples = proc.apvts.getRawParameterValue ("release")->load()
+                                 * 0.001f * proc.sampleRateAtomic.load();
+        const float segFrac = juce::jlimit (0.05f, 1.0f, relSamples / (float) len);
+        scSeg = juce::jmax (1, (int) (segFrac * (float) len));
+    }
+    drawEnvelope (kickPanel, frameSc, 0, scSeg,
+                  juce::Colours::orange.withAlpha (0.9f));
 
     // кривая сжатия — верхняя дорожка.
     // KICK: идеальная кривая по Shape/Len/Depth, COMP: измеренная из кадра.
@@ -711,9 +717,20 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
         }
     }
 
-    // подписи
+    // подписи панелей
     g.setFont (11.0f);
 
+    g.setColour (juce::Colours::steelblue.brighter (0.4f));
+    g.drawText (showOutput ? "BASS OUT" : "BASS",
+                (int) bassPanel.getX() + 4, (int) bassPanel.getY(), 90, 14,
+                juce::Justification::centredLeft);
+
+    g.setColour (juce::Colours::orange.brighter (0.3f));
+    g.drawText (kick ? "KICK" : "SC",
+                (int) kickPanel.getX() + 4, (int) kickPanel.getY(), 60, 14,
+                juce::Justification::centredLeft);
+
+    // служебные подписи
     g.setColour (juce::Colours::cyan);
     g.drawText (juce::String ("Duck -") + juce::String (depthDb, 1) + " dB",
                 (int) area.getX() + 6, (int) duckLane.getBottom() - 16, 110, 14,
@@ -736,20 +753,6 @@ void KickDuckAudioProcessorEditor::drawWaveforms (juce::Graphics& g, juce::Recta
                     (int) area.getRight() - 110, (int) waveLane.getBottom() - 16, 104, 14,
                     juce::Justification::centredRight);
     }
-
-    // легенда — правый верхний угол
-    auto legend = area.removeFromTop (16.0f).removeFromRight (176.0f);
-    auto dot = [&] (juce::Colour c, juce::String txt, float lx, float lw)
-    {
-        g.setColour (c);
-        g.fillRect (lx, legend.getY() + 5.0f, 8.0f, 8.0f);
-        g.setColour (juce::Colours::grey);
-        g.drawText (txt, (int) lx + 11, (int) legend.getY(), (int) lw, 16,
-                    juce::Justification::centredLeft);
-    };
-    dot (juce::Colours::steelblue, showOutput ? "Ducked" : "Bass", legend.getX(), 52.0f);
-    dot (juce::Colours::orange,    "Kick", legend.getX() + 60.0f, 40.0f);
-    dot (juce::Colours::cyan,      "Duck", legend.getX() + 108.0f, 40.0f);
 }
 
 void KickDuckAudioProcessorEditor::resized()

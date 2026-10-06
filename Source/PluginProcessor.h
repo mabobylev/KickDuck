@@ -62,6 +62,7 @@ private:
     float lastHpf = -1.0f;
     double freeBeatPos = 0.0;
     double lastBeatFloor = -1.0;
+    double kickPhase = 0.0;   // фаза синтетической волны кика для дисплея
 
     int frameWrite = 0;
     int frameFree  = 1;
