@@ -10,7 +10,6 @@
 
 #pragma once
 
-// --- НОВЫЕ ВКЛЮЧЕНИЯ ---
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -20,9 +19,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_dsp/juce_dsp.h>
-#include <juce_opengl/juce_opengl.h> // Для OpenGLContext
+#include <juce_opengl/juce_opengl.h>
 
-//==============================================================================
 class KickDuckAudioProcessor  : public juce::AudioProcessor
 {
 public:
@@ -57,47 +55,38 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    // --- ДРУЖБА для доступа к scopeFifo из Editor ---
     friend class KickDuckAudioProcessorEditor;
 
 private:
-    // Параметры
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* maxDuckParam = nullptr;
     std::atomic<float>* outGainParam = nullptr;
     std::atomic<float>* scHpfParam = nullptr;
-    std::atomic<bool>* bypassParam = nullptr;
+    std::atomic<float>* bypassParam = nullptr;
 
-    // Режимы
     enum class DuckMode { COMP, KICK };
     std::atomic<DuckMode> currentMode { DuckMode::COMP };
     std::atomic<DuckMode> targetMode { DuckMode::COMP };
 
-    // Кроссфейд
     bool isFading = false;
     int fadeCounter = 0;
     const int fadeLengthSamples = 480;
 
-    // Сглаживание
     float currentMix = 1.0f, targetMix = 1.0f;
     float currentGain = 1.0f, targetGain = 1.0f;
     float currentHpfFreq = 20.0f, targetHpfFreq = 20.0f;
 
-    // DSP
     juce::dsp::ProcessorChain<juce::dsp::IIR::Filter<float>> scHpfChain;
     juce::dsp::Gain<float> bypassGain;
     juce::dsp::Gain<float> outputGain;
 
-    // Транспорт
     double lastPlayheadSample = 0.0;
     double phaseAccumulator = 0.0;
     bool wasPlaying = false;
 
-    // Шины
     juce::dsp::AudioBlock<float> mainBlock;
     juce::dsp::AudioBlock<float> sidechainBlock;
 
-    // ОСЦИЛЛОГРАФ (оставляем private, доступ через friend)
     juce::AbstractFifo scopeFifo { 1024 };
     std::vector<float> scopeData;
 
