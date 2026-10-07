@@ -2,9 +2,7 @@
 
 //==============================================================================
 KickDuckAudioProcessorEditor::KickDuckAudioProcessorEditor (KickDuckAudioProcessor& p)
-    : AudioProcessorEditor (&p), audioProcessor (p),
-      // Инициализируем Attachments в теле конструктора, когда виджеты уже созданы
-      mixAttachment(), outGainAttachment(), bypassAttachment()
+    : AudioProcessorEditor (&p), audioProcessor (p)
 {
     // 1. Создаем виджеты
     mixSlider = std::make_unique<juce::Slider>();
@@ -18,12 +16,12 @@ KickDuckAudioProcessorEditor::KickDuckAudioProcessorEditor (KickDuckAudioProcess
     bypassButton = std::make_unique<juce::ToggleButton>();
     bypassButton->setButtonText ("IN/OUT");
 
-    // 2. ПРИОРИТЕТ: Сначала добавляем в иерархию, потом привязываем APVTS
+    // 2. Добавляем в иерархию (передаем сырой указатель через .get())
     addAndMakeVisible (mixSlider.get());
     addAndMakeVisible (outGainSlider.get());
     addAndMakeVisible (bypassButton.get());
 
-    // 3. Теперь привязываем параметры (когда виджеты уже "живут")
+    // 3. Создаем Attachments (ИСПРАВЛЕНО: через reset/new, так как Slider* уже валидны)
     mixAttachment.reset (new juce::AudioProcessorValueTreeState::SliderAttachment (p.apvts, "mix", *mixSlider));
     outGainAttachment.reset (new juce::AudioProcessorValueTreeState::SliderAttachment (p.apvts, "outGain", *outGainSlider));
     bypassAttachment.reset (new juce::AudioProcessorValueTreeState::ButtonAttachment (p.apvts, "bypass", *bypassButton));
@@ -54,7 +52,7 @@ void KickDuckAudioProcessorEditor::timerCallback()
 
 void KickDuckAudioProcessorEditor::updateScopeData()
 {
-    // ИСПРАВЛЕНО: используем ScopedRead
+    // ИСПРАВЛЕНО: доступ к private полям через дружественный класс
     juce::AbstractFifo::ScopedRead read (audioProcessor.scopeFifo, 1);
     if (read.blockSize1 > 0)
     {
@@ -66,8 +64,5 @@ void KickDuckAudioProcessorEditor::updateScopeData()
         scopePath.startNewSubPath(0, h * 0.5f);
         float val = audioProcessor.scopeData[read.startIndex1];
         scopePath.lineTo(w, (1.0f - val) * h);
-        
-        // Для плавной линии лучше использовать scaleToFit для всего пути
-        // Но так как у нас всего 1 семпл за кадр, рисуем просто линию
     }
 }

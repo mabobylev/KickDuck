@@ -10,7 +10,7 @@
 
 #pragma once
 
-// --- НОВЫЕ ВКЛЮЧЕНИЯ ВМЕСТО JuceHeader.h ---
+// --- НОВЫЕ ВКЛЮЧЕНИЯ ---
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -19,9 +19,8 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
-
-// --- КРИТИЧЕСКИ ВАЖНО: Подключаем DSP ---
 #include <juce_dsp/juce_dsp.h>
+#include <juce_opengl/juce_opengl.h> // Для OpenGLContext
 
 //==============================================================================
 class KickDuckAudioProcessor  : public juce::AudioProcessor
@@ -58,13 +57,15 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // --- ДРУЖБА для доступа к scopeFifo из Editor ---
+    friend class KickDuckAudioProcessorEditor;
+
 private:
     // Параметры
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* maxDuckParam = nullptr;
     std::atomic<float>* outGainParam = nullptr;
     std::atomic<float>* scHpfParam = nullptr;
-    // Исправлено: bypass это bool, а не float
     std::atomic<bool>* bypassParam = nullptr;
 
     // Режимы
@@ -77,7 +78,7 @@ private:
     int fadeCounter = 0;
     const int fadeLengthSamples = 480;
 
-    // Сглаживание (Ramp)
+    // Сглаживание
     float currentMix = 1.0f, targetMix = 1.0f;
     float currentGain = 1.0f, targetGain = 1.0f;
     float currentHpfFreq = 20.0f, targetHpfFreq = 20.0f;
@@ -96,7 +97,7 @@ private:
     juce::dsp::AudioBlock<float> mainBlock;
     juce::dsp::AudioBlock<float> sidechainBlock;
 
-    // ОСЦИЛЛОГРАФ
+    // ОСЦИЛЛОГРАФ (оставляем private, доступ через friend)
     juce::AbstractFifo scopeFifo { 1024 };
     std::vector<float> scopeData;
 

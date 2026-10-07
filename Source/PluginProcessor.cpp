@@ -15,13 +15,13 @@ KickDuckAudioProcessor::KickDuckAudioProcessor()
     maxDuckParam = apvts.getRawParameterValue ("maxDuck");
     outGainParam = apvts.getRawParameterValue ("outGain");
     scHpfParam = apvts.getRawParameterValue ("scHpf");
-    bypassParam = apvts.getRawParameterValue ("bypass"); // Теперь указывает на bool
+    bypassParam = apvts.getRawParameterValue ("bypass");
 
     scHpfChain.get<0>().coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (48000.0, 80.0f);
     scopeData.resize (scopeFifo.getTotalSize());
 }
 
-// ... (деструктор и остальные методы JUCE boilerplate остаются прежними) ...
+// ... (деструктор и boilerplate) ...
 
 void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
@@ -37,17 +37,12 @@ void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
-    
-    // Clear extra channels
     for (int i = getTotalNumInputChannels(); i < getTotalNumOutputChannels(); ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // --- 1. Clickless Bypass ---
+    // --- 1. Clickless Bypass (ИСПРАВЛЕНО: Gain в JUCE 8+ не имеет getTargetValue) ---
     bool bypassState = bypassParam->load();
-    if (bypassState && bypassGain.getTargetValue() > 0.0f)
-        bypassGain.setTargetValue (0.0f);
-    else if (!bypassState && bypassGain.getTargetValue() < 1.0f)
-        bypassGain.setTargetValue (1.0f);
+    bypassGain.setGainLinear (bypassState ? 0.0f : 1.0f);
 
     // --- 2. Режим KICK ---
     if (currentMode.load() == DuckMode::KICK)
@@ -88,9 +83,10 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     
     if (getBusCount (true) > 1)
     {
-        if (auto* scBus = getBusBuffer (buffer, true, 1)) // Возвращает AudioBuffer<float>*
+        // ИСПРАВЛЕНО: getBusBuffer возвращает AudioBuffer<float>&
+        if (auto& scBus = getBusBuffer (buffer, true, 1))
         {
-            juce::dsp::AudioBlock<float> sidechainBlock (*scBus);
+            juce::dsp::AudioBlock<float> sidechainBlock (scBus);
             scHpfChain.process (juce::dsp::ProcessContextReplacing<float> (sidechainBlock));
         }
     }
@@ -119,7 +115,7 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     outputGain.process (context);
     bypassGain.process (context);
 
-    // --- 7. ОСЦИЛЛОГРАФ (ИСПРАВЛЕНО) ---
+    // --- 7. ОСЦИЛЛОГРАФ (ИСПРАВЛЕНО: ScopedWrite) ---
     float maxLevel = 0.0f;
     for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
     {
@@ -138,7 +134,6 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     if (scopeFifo.getFreeSpace() > 0)
     {
-        // ИСПРАВЛЕНО: используем ScopedWrite
         juce::AbstractFifo::ScopedWrite write (scopeFifo, 1);
         scopeData[write.startIndex1] = normalized;
     }
