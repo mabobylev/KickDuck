@@ -48,6 +48,8 @@ target_link_libraries(KickDuck PRIVATE
     juce::juce_audio_utils
     juce::juce_gui_basics
     juce::juce_gui_extra
+    # --- КРИТИЧЕСКИ ВАЖНО: Модуль DSP ---
+    juce::juce_dsp 
 )
 
 # --- 6. Подавление предупреждений (кроссплатформенно) ---

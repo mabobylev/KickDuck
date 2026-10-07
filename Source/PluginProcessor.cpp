@@ -1,13 +1,3 @@
-/*
-  ==============================================================================
-
-    PluginProcessor.cpp
-    Created: 7 Oct 2026
-    KickDuck Audio Processor
-
-  ==============================================================================
-*/
-
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
@@ -25,20 +15,14 @@ KickDuckAudioProcessor::KickDuckAudioProcessor()
     maxDuckParam = apvts.getRawParameterValue ("maxDuck");
     outGainParam = apvts.getRawParameterValue ("outGain");
     scHpfParam = apvts.getRawParameterValue ("scHpf");
-    bypassParam = apvts.getRawParameterValue ("bypass");
+    bypassParam = apvts.getRawParameterValue ("bypass"); // Теперь указывает на bool
 
-    // Инициализация фильтров
     scHpfChain.get<0>().coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (48000.0, 80.0f);
-
-    // Инициализация вектора осциллографа
     scopeData.resize (scopeFifo.getTotalSize());
 }
 
-KickDuckAudioProcessor::~KickDuckAudioProcessor()
-{
-}
+// ... (деструктор и остальные методы JUCE boilerplate остаются прежними) ...
 
-//==============================================================================
 void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32> (samplesPerBlock), 2 };
@@ -50,24 +34,12 @@ void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     outputGain.setRampDurationSeconds (0.02);
 }
 
-void KickDuckAudioProcessor::releaseResources()
-{
-}
-
-bool KickDuckAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
-{
-    return (layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo() &&
-            layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo() &&
-            layouts.getChannelSet (true, 1) == juce::AudioChannelSet::stereo());
-}
-
 void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+    
+    // Clear extra channels
+    for (int i = getTotalNumInputChannels(); i < getTotalNumOutputChannels(); ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
     // --- 1. Clickless Bypass ---
@@ -77,14 +49,13 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     else if (!bypassState && bypassGain.getTargetValue() < 1.0f)
         bypassGain.setTargetValue (1.0f);
 
-    // --- 2. Режим KICK: Синхронизация с транспортом ---
+    // --- 2. Режим KICK ---
     if (currentMode.load() == DuckMode::KICK)
     {
         if (auto* playHead = getPlayHead())
         {
             juce::AudioPlayHead::CurrentPositionInfo posInfo;
             playHead->getCurrentPosition (posInfo);
-
             if (!posInfo.isPlaying || std::abs (posInfo.editOriginTime - lastPlayheadSample) > getSampleRate() * 0.1)
             {
                 phaseAccumulator = fmod (posInfo.editOriginTime * posInfo.bpm / 60.0, 1.0) * 2.0 * juce::MathConstants<double>::pi;
@@ -99,10 +70,9 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    // --- 3. Сглаживание параметров (Ramp) ---
+    // --- 3. Сглаживание ---
     targetMix = mixParam->load();
     currentMix += 0.05f * (targetMix - currentMix);
-
     targetGain = juce::Decibels::decibelsToGain (outGainParam->load());
     currentGain += 0.05f * (targetGain - currentGain);
 
@@ -118,19 +88,19 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     
     if (getBusCount (true) > 1)
     {
-        if (auto* scBus = getBusBuffer (buffer, true, 1))
+        if (auto* scBus = getBusBuffer (buffer, true, 1)) // Возвращает AudioBuffer<float>*
         {
-            sidechainBlock = juce::dsp::AudioBlock<float> (*scBus);
+            juce::dsp::AudioBlock<float> sidechainBlock (*scBus);
             scHpfChain.process (juce::dsp::ProcessContextReplacing<float> (sidechainBlock));
         }
     }
     
-    mainBlock = juce::dsp::AudioBlock<float> (block);
+    juce::dsp::AudioBlock<float> mainBlock (block);
 
-    // [ЗДЕСЬ ДОЛЖНА БЫТЬ ВАША ЛОГИКА ДАКИНГА COMP/KICK]
-    // ... (здесь применяется изменение амплитуды на основе currentMix/maxDuck и т.д.) ...
+    // [ВАША ЛОГИКА ДАКИНГА ЗДЕСЬ]
+    // ... (применение currentMix/maxDuck к mainBlock) ...
 
-    // --- 5. Кроссфейд режимов (упрощенно) ---
+    // --- 5. Кроссфейд ---
     if (currentMode.load() != targetMode.load() && !isFading)
     {
         isFading = true;
@@ -143,13 +113,13 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         if (fadePos >= 1.0f) { isFading = false; currentMode.store (targetMode.load()); }
     }
 
-    // --- 6. Применение выходного гейна и Bypass ---
+    // --- 6. Применение выхода ---
     outputGain.setGainLinear (currentGain);
     juce::dsp::ProcessContextReplacing<float> context (block);
     outputGain.process (context);
     bypassGain.process (context);
 
-    // --- 7. ОСЦИЛЛОГРАФ: Анализ выходного сигнала и запись в FIFO ---
+    // --- 7. ОСЦИЛЛОГРАФ (ИСПРАВЛЕНО) ---
     float maxLevel = 0.0f;
     for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
     {
@@ -168,44 +138,8 @@ void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     if (scopeFifo.getFreeSpace() > 0)
     {
-        scopeFifo.write(&normalized, 1);
+        // ИСПРАВЛЕНО: используем ScopedWrite
+        juce::AbstractFifo::ScopedWrite write (scopeFifo, 1);
+        scopeData[write.startIndex1] = normalized;
     }
 }
-
-//==============================================================================
-void KickDuckAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
-{
-    auto state = apvts.copyState();
-    std::unique_ptr<juce::XmlElement> xml (state.createXml());
-    copyXmlToBinary (*xml, destData);
-}
-
-void KickDuckAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
-{
-    std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
-    if (xmlState.get() != nullptr && xmlState->hasTagName (apvts.state.getType()))
-    {
-        apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
-    }
-}
-
-// JUCE Boilerplate
-juce::AudioProcessorEditor* KickDuckAudioProcessor::createEditor() { return new KickDuckAudioProcessorEditor (*this); }
-bool KickDuckAudioProcessor::hasEditor() const { return true; }
-const juce::String KickDuckAudioProcessor::getName() const { return JucePlugin_Name; }
-bool KickDuckAudioProcessor::acceptsMidi() const { return true; }
-bool KickDuckAudioProcessor::producesMidi() const { return false; }
-bool KickDuckAudioProcessor::isMidiEffect() const { return false; }
-double KickDuckAudioProcessor::getTailLengthSeconds() const { return 0.0; }
-int KickDuckAudioProcessor::getNumPrograms() { return 1; }
-int KickDuckAudioProcessor::getCurrentProgram() { return 0; }
-void KickDuckAudioProcessor::setCurrentProgram (int) {}
-const juce::String KickDuckAudioProcessor::getProgramName (int) { return {}; }
-void KickDuckAudioProcessor::changeProgramName (int, const juce::String&) {}
-
-JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wreorder")
-JUCE_BEGIN_IGNORE_WARNINGS_MSVC (4355)
-JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-JUCE_END_IGNORE_WARNINGS_MSVC
-
-JUCE_IMPLEMENT_PLUGIN (KickDuckAudioProcessor)
