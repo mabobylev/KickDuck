@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include <JuceHeader.h>
+#include "../JUCE/JuceHeader.h"
 
 //==============================================================================
 class KickDuckAudioProcessor  : public juce::AudioProcessor
