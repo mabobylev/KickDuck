@@ -49,3 +49,4 @@ if (TARGET juce::juce_core)
         -Wno-stringop-overflow
         -Wno-deprecated-declarations)
 endif()
+
