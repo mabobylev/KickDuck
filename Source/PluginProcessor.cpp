@@ -1,372 +1,211 @@
+/*
+  ==============================================================================
+
+    PluginProcessor.cpp
+    Created: 7 Oct 2026
+    KickDuck Audio Processor
+
+  ==============================================================================
+*/
+
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+//==============================================================================
 KickDuckAudioProcessor::KickDuckAudioProcessor()
-    : AudioProcessor (BusesProperties()
-        .withInput  ("Input",     juce::AudioChannelSet::stereo(), true)
-        .withOutput ("Output",    juce::AudioChannelSet::stereo(), true)
-        .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
-      apvts (*this, nullptr, "PARAMS", createLayout())
+     : apvts (*this, nullptr, "Parameters", {
+          std::make_unique<juce::AudioParameterFloat> ("mix", "Mix", juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f),
+          std::make_unique<juce::AudioParameterFloat> ("maxDuck", "Max Duck", juce::NormalisableRange<float> (0.0f, 24.0f, 0.1f), 12.0f),
+          std::make_unique<juce::AudioParameterFloat> ("outGain", "Out Gain", juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f),
+          std::make_unique<juce::AudioParameterFloat> ("scHpf", "SC HPF", juce::NormalisableRange<float> (20.0f, 2000.0f, 1.0f, 0.3f), 80.0f),
+          std::make_unique<juce::AudioParameterBool> ("bypass", "Bypass", false)
+     })
 {
-    pIn    = apvts.getRawParameterValue ("input");
-    pThr   = apvts.getRawParameterValue ("threshold");
-    pRatio = apvts.getRawParameterValue ("ratio");
-    pAtk   = apvts.getRawParameterValue ("attack");
-    pRel   = apvts.getRawParameterValue ("release");
-    pKnee  = apvts.getRawParameterValue ("knee");
-    pDepth = apvts.getRawParameterValue ("depth");
-    pMix   = apvts.getRawParameterValue ("mix");
-    pHpf   = apvts.getRawParameterValue ("hpf");
-    pOut   = apvts.getRawParameterValue ("output");
-    pMode  = apvts.getRawParameterValue ("mode");
-    pLen   = apvts.getRawParameterValue ("kicklen");
-    pShape = apvts.getRawParameterValue ("shape");
+    mixParam = apvts.getRawParameterValue ("mix");
+    maxDuckParam = apvts.getRawParameterValue ("maxDuck");
+    outGainParam = apvts.getRawParameterValue ("outGain");
+    scHpfParam = apvts.getRawParameterValue ("scHpf");
+    bypassParam = apvts.getRawParameterValue ("bypass");
+
+    // Инициализация фильтров
+    scHpfChain.get<0>().coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (48000.0, 80.0f);
+
+    // Инициализация вектора осциллографа
+    scopeData.resize (scopeFifo.getTotalSize());
 }
 
-juce::AudioProcessorValueTreeState::ParameterLayout KickDuckAudioProcessor::createLayout()
+KickDuckAudioProcessor::~KickDuckAudioProcessor()
 {
-    using P = juce::AudioParameterFloat;
-    juce::AudioProcessorValueTreeState::ParameterLayout l;
+}
 
-    auto add = [&] (juce::String id, juce::String name, float lo, float hi,
-                    float def, float step, juce::String suffix, float skew = 1.0f)
-    {
-        juce::NormalisableRange<float> r (lo, hi, step);
-        if (skew != 1.0f) r.setSkewForCentre (skew);
-        l.add (std::make_unique<P> (juce::ParameterID { id, 1 }, name, r, def,
-                                    juce::AudioParameterFloatAttributes().withLabel (suffix)));
-    };
+//==============================================================================
+void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+    juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32> (samplesPerBlock), 2 };
+    scHpfChain.prepare (spec);
+    bypassGain.prepare (spec);
+    outputGain.prepare (spec);
 
-    add ("input", "Input", -12.0f, 12.0f, 0.0f, 0.1f, "dB");
+    bypassGain.setRampDurationSeconds (0.02);
+    outputGain.setRampDurationSeconds (0.02);
+}
 
-    // COMP-режим
-    add ("threshold", "Threshold", -60.0f, 0.0f,  -24.0f, 0.1f,  "dB");
-    add ("attack",    "Attack",      0.1f, 100.0f, 5.0f,  0.1f,  "ms",  10.0f);
-    add ("release",   "Release",     5.0f, 1000.0f, 120.0f, 1.0f, "ms",  100.0f);
-
-    l.add (std::make_unique<juce::AudioParameterChoice> (
-        juce::ParameterID { "ratio", 1 }, "Ratio",
-        juce::StringArray { "1:1", "1.5:1", "2:1", "3:1", "4:1",
-                            "6:1", "8:1", "10:1", "20:1", "Inf:1" },
-        4));
-
-    l.add (std::make_unique<juce::AudioParameterChoice> (
-        juce::ParameterID { "knee", 1 }, "Knee",
-        juce::StringArray { "0 dB", "6 dB", "12 dB", "18 dB", "24 dB" },
-        1));
-
-    // общие
-    add ("depth",  "Max duck",  0.0f, 24.0f,   9.0f, 0.1f, "dB");
-    add ("mix",    "Mix",       0.0f, 100.0f, 100.0f, 1.0f, "%");
-    add ("hpf",    "SC HPF",   20.0f, 2000.0f, 60.0f, 1.0f, "Hz", 200.0f);
-    add ("output", "Output", -12.0f, 12.0f,   0.0f, 0.1f,  "dB");
-
-    // KICK-режим
-    add ("shape",   "Shape",  0.5f, 8.0f,     3.0f, 0.01f,  "");
-    add ("kicklen", "Length", 0.03125f, 8.0f, 0.5f, 0.001f, "bt", 0.5f);
-
-    l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "mode", 1 },
-                                                       "Kick mode", false));
-
-    return l;
+void KickDuckAudioProcessor::releaseResources()
+{
 }
 
 bool KickDuckAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-    if (layouts.getMainInputChannelSet() != layouts.getMainOutputChannelSet())
-        return false;
-
-    const auto sc = layouts.getChannelSet (true, 1);
-    return sc.isDisabled() || sc == juce::AudioChannelSet::stereo();
-}
-
-void KickDuckAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
-{
-    sr = sampleRate;
-    env = 0.0f;
-    grSmoothed = 0.0f;
-    lastHpf = -1.0f;
-    freeBeatPos = 0.0;
-    lastBeatFloor = -1.0;
-    kickPhase = 0.0;
-    framePos = 0;
-    frameWrite = 0;
-    frameFree = 1;
-
-    sampleRateAtomic.store ((float) sampleRate, std::memory_order_relaxed);
-    framePublished.store (-1, std::memory_order_relaxed);
-    frameVersion.store (0, std::memory_order_relaxed);
-    grLevel.store (0.0f, std::memory_order_relaxed);
-
-    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, 1 };
-    for (auto& f : scHP)
-        f.prepare (spec);
-}
-
-void KickDuckAudioProcessor::publishFrame()
-{
-    if (framePos <= 0)
-        return;
-
-    {
-        juce::SpinLock::ScopedLockType sl (frameLock);
-        frameLens[frameWrite] = framePos;
-        framePublished.store (frameWrite, std::memory_order_release);
-        frameVersion.fetch_add (1, std::memory_order_relaxed);
-
-        const int prev = frameWrite;
-        frameWrite = frameFree;
-        frameFree  = prev;
-        framePos = 0;
-    }
+    return (layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo() &&
+            layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo() &&
+            layouts.getChannelSet (true, 1) == juce::AudioChannelSet::stereo());
 }
 
 void KickDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    static constexpr float ratioVals[] =
-        { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 10.0f, 20.0f, 1000.0f };
-    static constexpr float kneeVals[] = { 0.0f, 6.0f, 12.0f, 18.0f, 24.0f };
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear (i, 0, buffer.getNumSamples());
 
-    const float thr     = pThr->load();
-    const float ratio   = ratioVals[juce::jlimit (0, 9, (int) pRatio->load())];
-    const float knee    = kneeVals [juce::jlimit (0, 4, (int) pKnee->load())];
-    const float attack  = pAtk->load();
-    const float release = pRel->load();
-    const float depth   = pDepth->load();
-    const float mix     = pMix->load() * 0.01f;
-    const float outGain = pOut->load();
-    const float shape   = pShape->load();
-    const bool  kickMode = pMode->load() > 0.5f;
+    // --- 1. Clickless Bypass ---
+    bool bypassState = bypassParam->load();
+    if (bypassState && bypassGain.getTargetValue() > 0.0f)
+        bypassGain.setTargetValue (0.0f);
+    else if (!bypassState && bypassGain.getTargetValue() < 1.0f)
+        bypassGain.setTargetValue (1.0f);
 
-    juce::Optional<juce::AudioPlayHead::PositionInfo> posInfo;
-    double bpm = 120.0;
-    bool havePlay = false;
-    bool usePpq = false;
-    double ppqPos = 0.0;
-
-    if (auto* ph = getPlayHead())
-        if ((posInfo = ph->getPosition()).hasValue())
+    // --- 2. Режим KICK: Синхронизация с транспортом ---
+    if (currentMode.load() == DuckMode::KICK)
+    {
+        if (auto* playHead = getPlayHead())
         {
-            if (auto bpmOpt = posInfo->getBpm())
-                bpm = *bpmOpt;
-            havePlay = posInfo->getIsPlaying();
-            if (havePlay && posInfo->getPpqPosition().hasValue())
+            juce::AudioPlayHead::CurrentPositionInfo posInfo;
+            playHead->getCurrentPosition (posInfo);
+
+            if (!posInfo.isPlaying || std::abs (posInfo.editOriginTime - lastPlayheadSample) > getSampleRate() * 0.1)
             {
-                usePpq = true;
-                ppqPos = *posInfo->getPpqPosition();
+                phaseAccumulator = fmod (posInfo.editOriginTime * posInfo.bpm / 60.0, 1.0) * 2.0 * juce::MathConstants<double>::pi;
+                wasPlaying = false;
             }
-        }
-
-    bpmAtomic.store ((float) bpm, std::memory_order_relaxed);
-
-    const double beatDur = 60.0 / bpm;
-    const float lenBeats = pLen->load();
-    const float lenSec = (float) (beatDur * (double) lenBeats);
-
-    const float kickCoef = std::exp (-1.0f / (float) (sr * 0.0015));
-    const float kickDispCoef = std::exp (-1.0f / (float) (sr * 0.04));
-    float kickDisp = 0.0f;
-
-    duckLenSamples.store (lenSec * (float) sr, std::memory_order_relaxed);
-
-    auto mainBuf = getBusBuffer (buffer, true, 0);
-    auto scBuf   = getBusBuffer (buffer, true, 1);
-    const int numMain = getChannelCountOfBus (true, 0);
-    const int numSc   = getChannelCountOfBus (true, 1);
-    const int n = buffer.getNumSamples();
-
-    const float inGain = juce::Decibels::decibelsToGain (pIn->load());
-    for (int ch = 0; ch < mainBuf.getNumChannels(); ++ch)
-    {
-        auto* d = mainBuf.getWritePointer (ch);
-        for (int i = 0; i < n; ++i)
-            d[i] *= inGain;
-    }
-
-    if (numSc > 0 && ! kickMode)
-    {
-        const float hpfHz = pHpf->load();
-        if (hpfHz != lastHpf)
-        {
-            auto coeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass (sr, hpfHz);
-            for (auto& f : scHP)
-                f.coefficients = coeffs;
-            lastHpf = hpfHz;
-        }
-
-        for (int ch = 0; ch < numSc; ++ch)
-        {
-            auto* d = scBuf.getWritePointer (ch);
-            for (int i = 0; i < n; ++i)
-                d[i] = scHP[ch].processSample (d[i]);
-        }
-    }
-
-    const float atkCoef = std::exp (-1.0f / (float) (sr * attack  * 0.001));
-    const float relCoef = std::exp (-1.0f / (float) (sr * release * 0.001));
-    const float grCoef  = std::exp (-1.0f / (float) (sr * 0.005));
-
-    bool newBeat = false;
-    if (havePlay)
-    {
-        const double blockBeatPos = usePpq ? ppqPos : freeBeatPos;
-        const double bf = std::floor (blockBeatPos);
-
-        if (bf != lastBeatFloor)
-        {
-            lastBeatFloor = bf;
-            newBeat = true;
-        }
-
-        if (! usePpq)
-            freeBeatPos += (double) n * bpm / (60.0 * (double) sr);
-
-        if (newBeat)
-        {
-            if (kickMode)
+            else if (posInfo.isPlaying && !wasPlaying)
             {
-                kickDisp = 1.0f;
-                kickPhase = 0.0;
+                phaseAccumulator = 0.0;
             }
-            publishFrame();
-        }
-    }
-    else
-    {
-        framePos = 0;
-        lastBeatFloor = -1.0;
-    }
-
-    float peakIn = 0.0f, peakOut = 0.0f, peakSc = 0.0f, peakDuck = 0.0f;
-    float scDisp = 0.0f;
-
-    for (int i = 0; i < n; ++i)
-    {
-        float gr = 0.0f;
-
-        if (! kickMode)
-        {
-            float sc = 0.0f;
-            if (numSc > 0)
-                for (int ch = 0; ch < numSc; ++ch)
-                    sc = juce::jmax (sc, std::abs (scBuf.getSample (ch, i)));
-            else
-                for (int ch = 0; ch < numMain; ++ch)
-                    sc = juce::jmax (sc, std::abs (mainBuf.getSample (ch, i)));
-
-            env = (sc > env) ? env + (sc - env) * atkCoef
-                             : env + (sc - env) * relCoef;
-
-            const float envDb = juce::Decibels::gainToDecibels (juce::jmax (env, 1.0e-6f));
-            const float over  = envDb - thr;
-
-            if (over <= -0.5f * knee)
-                gr = 0.0f;
-            else if (over < 0.5f * knee)
-            {
-                const float t = over + 0.5f * knee;
-                gr = (1.0f / ratio - 1.0f) * t * t / (2.0f * knee);
-            }
-            else
-                gr = over * (1.0f / ratio - 1.0f);
-
-            gr = juce::jmax (gr, -depth);
-            grSmoothed += (gr - grSmoothed) * grCoef;
-
-            peakSc = juce::jmax (peakSc, sc);
-            scDisp = scBuf.getNumSamples() > 0 ? scBuf.getSample (0, i) : sc;
-        }
-        else
-        {
-            const double beatPos = usePpq
-                ? ppqPos + (double) i * bpm / (60.0 * (double) sr)
-                : freeBeatPos;
-
-            float tn = 0.0f;
-            const double frac = beatPos - std::floor (beatPos);
-            if (lenSec > 0.0f)
-                tn = juce::jlimit (0.0f, 1.0f, (float) (frac * beatDur / (double) lenSec));
-
-            const float target = -depth * std::pow (1.0f - tn, shape);
-            grSmoothed += (target - grSmoothed) * kickCoef;
-
-            // биполярная синтетическая волна кика для дисплея: синус 60 Гц со спадом
-            kickDisp *= kickDispCoef;
-            kickPhase += juce::MathConstants<double>::twoPi * 60.0 / sr;
-            if (kickPhase >= juce::MathConstants<double>::twoPi)
-                kickPhase -= juce::MathConstants<double>::twoPi;
-
-            scDisp = kickDisp * (float) std::sin (kickPhase);
-            peakSc = juce::jmax (peakSc, kickDisp);
-        }
-
-        grSmoothed = juce::jlimit (-depth, 0.0f, grSmoothed);
-        peakDuck = juce::jmax (peakDuck, -grSmoothed);
-
-        const float g   = juce::Decibels::decibelsToGain (grSmoothed + outGain);
-        const float wet = g * mix + (1.0f - mix);
-
-        float pre = 0.0f;
-        for (int ch = 0; ch < numMain; ++ch)
-            pre += mainBuf.getSample (ch, i);
-        if (numMain > 0) pre /= (float) numMain;
-
-        peakIn  = juce::jmax (peakIn,  std::abs (pre));
-        peakOut = juce::jmax (peakOut, std::abs (pre) * wet);
-
-        for (int ch = 0; ch < numMain; ++ch)
-            mainBuf.setSample (ch, i, mainBuf.getSample (ch, i) * wet);
-
-        if (havePlay && framePos < frameSize)
-        {
-            frameMain[frameWrite][framePos] = pre;
-            frameOut [frameWrite][framePos] = pre * wet;
-            frameSc  [frameWrite][framePos] = scDisp;
-            frameGr  [frameWrite][framePos] = grSmoothed;
-            ++framePos;
+            wasPlaying = posInfo.isPlaying;
+            lastPlayheadSample = posInfo.editOriginTime;
         }
     }
 
-    const float decay = std::exp (-(float) n / (float) (sr * 0.4f));
-    auto updateLevel = [&] (std::atomic<float>& lvl, float peak)
-    {
-        lvl.store (juce::jmax (peak, lvl.load (std::memory_order_relaxed) * decay),
-                   std::memory_order_relaxed);
-    };
-    updateLevel (inLevel,  peakIn);
-    updateLevel (outLevel, peakOut);
-    updateLevel (scLevel,  peakSc);
+    // --- 3. Сглаживание параметров (Ramp) ---
+    targetMix = mixParam->load();
+    currentMix += 0.05f * (targetMix - currentMix);
 
-    const float grDecay = std::exp (-(float) n / (float) (sr * 0.3f));
-    grLevel.store (juce::jmax (peakDuck,
-                   grLevel.load (std::memory_order_relaxed) * grDecay),
-                   std::memory_order_relaxed);
+    targetGain = juce::Decibels::decibelsToGain (outGainParam->load());
+    currentGain += 0.05f * (targetGain - currentGain);
+
+    if (std::abs (targetHpfFreq - scHpfParam->load()) > 1.0f)
+    {
+        targetHpfFreq = scHpfParam->load();
+        auto newCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass (getSampleRate(), targetHpfFreq);
+        scHpfChain.get<0>().coefficients = newCoeffs;
+    }
+
+    // --- 4. Обработка ---
+    juce::dsp::AudioBlock<float> block (buffer);
+    
+    if (getBusCount (true) > 1)
+    {
+        if (auto* scBus = getBusBuffer (buffer, true, 1))
+        {
+            sidechainBlock = juce::dsp::AudioBlock<float> (*scBus);
+            scHpfChain.process (juce::dsp::ProcessContextReplacing<float> (sidechainBlock));
+        }
+    }
+    
+    mainBlock = juce::dsp::AudioBlock<float> (block);
+
+    // [ЗДЕСЬ ДОЛЖНА БЫТЬ ВАША ЛОГИКА ДАКИНГА COMP/KICK]
+    // ... (здесь применяется изменение амплитуды на основе currentMix/maxDuck и т.д.) ...
+
+    // --- 5. Кроссфейд режимов (упрощенно) ---
+    if (currentMode.load() != targetMode.load() && !isFading)
+    {
+        isFading = true;
+        fadeCounter = 0;
+    }
+    if (isFading)
+    {
+        fadeCounter++;
+        float fadePos = (float)fadeCounter / (float)fadeLengthSamples;
+        if (fadePos >= 1.0f) { isFading = false; currentMode.store (targetMode.load()); }
+    }
+
+    // --- 6. Применение выходного гейна и Bypass ---
+    outputGain.setGainLinear (currentGain);
+    juce::dsp::ProcessContextReplacing<float> context (block);
+    outputGain.process (context);
+    bypassGain.process (context);
+
+    // --- 7. ОСЦИЛЛОГРАФ: Анализ выходного сигнала и запись в FIFO ---
+    float maxLevel = 0.0f;
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+    {
+        auto* channelData = buffer.getReadPointer(channel);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            float absSample = std::abs(channelData[i]);
+            if (absSample > maxLevel)
+                maxLevel = absSample;
+        }
+    }
+
+    maxLevel = juce::jmin(1.0f, maxLevel);
+    float dbValue = juce::Decibels::gainToDecibels(maxLevel, -100.0f);
+    float normalized = (dbValue + 100.0f) / 100.0f;
+
+    if (scopeFifo.getFreeSpace() > 0)
+    {
+        scopeFifo.write(&normalized, 1);
+    }
 }
 
-void KickDuckAudioProcessor::getStateInformation (juce::MemoryBlock& dest)
+//==============================================================================
+void KickDuckAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    juce::MemoryOutputStream mos (dest, false);
-    apvts.state.writeToStream (mos);
+    auto state = apvts.copyState();
+    std::unique_ptr<juce::XmlElement> xml (state.createXml());
+    copyXmlToBinary (*xml, destData);
 }
 
 void KickDuckAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    auto tree = juce::ValueTree::fromXml (juce::String::createStringFromData (data, sizeInBytes));
-    if (tree.isValid())
-        apvts.replaceState (tree);
+    std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
+    if (xmlState.get() != nullptr && xmlState->hasTagName (apvts.state.getType()))
+    {
+        apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
+    }
 }
 
-juce::AudioProcessorEditor* KickDuckAudioProcessor::createEditor()
-{
-    return new KickDuckAudioProcessorEditor (*this);
-}
+// JUCE Boilerplate
+juce::AudioProcessorEditor* KickDuckAudioProcessor::createEditor() { return new KickDuckAudioProcessorEditor (*this); }
+bool KickDuckAudioProcessor::hasEditor() const { return true; }
+const juce::String KickDuckAudioProcessor::getName() const { return JucePlugin_Name; }
+bool KickDuckAudioProcessor::acceptsMidi() const { return true; }
+bool KickDuckAudioProcessor::producesMidi() const { return false; }
+bool KickDuckAudioProcessor::isMidiEffect() const { return false; }
+double KickDuckAudioProcessor::getTailLengthSeconds() const { return 0.0; }
+int KickDuckAudioProcessor::getNumPrograms() { return 1; }
+int KickDuckAudioProcessor::getCurrentProgram() { return 0; }
+void KickDuckAudioProcessor::setCurrentProgram (int) {}
+const juce::String KickDuckAudioProcessor::getProgramName (int) { return {}; }
+void KickDuckAudioProcessor::changeProgramName (int, const juce::String&) {}
 
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
-{
-    return new KickDuckAudioProcessor();
-}
+JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wreorder")
+JUCE_BEGIN_IGNORE_WARNINGS_MSVC (4355)
+JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+JUCE_END_IGNORE_WARNINGS_MSVC
 
+JUCE_IMPLEMENT_PLUGIN (KickDuckAudioProcessor)
